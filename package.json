@@ -64,7 +64,7 @@
     },
     "devDependencies": {
         "@opentui/core": "0.5.14",
-        "@opentui/solid": "0.5.12",
+        "@opentui/solid": "0.5.14",
         "@types/node": "^26.6.3",
         "esbuild": "^0.28.2",
         "oxlint": "^1.86.0",
