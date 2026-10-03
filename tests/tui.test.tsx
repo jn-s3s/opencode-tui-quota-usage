@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+// Mock Windows platform so credential prompt tests work on Linux CI
+const originalPlatform = process.platform;
+beforeAll(() => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+});
+afterAll(() => {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+});
 
 const codex = vi.hoisted(() => ({
     usage: vi.fn(),
