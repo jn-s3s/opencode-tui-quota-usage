@@ -71,7 +71,7 @@
         "prettier": "^3.9.9",
         "solid-js": "1.9.12",
         "typescript": "^5.6.0",
-        "vitest": "^4.1.11"
+        "vitest": "^5.0.3"
     },
     "optionalDependencies": {
         "@github/keytar": "7.10.6"
