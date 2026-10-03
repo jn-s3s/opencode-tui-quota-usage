@@ -1,0 +1,110 @@
+# Release process (maintainer):
+# 1. Add a dated section to CHANGELOG.md.
+# 2. Run npm version major, minor or patch, then push the commit plus tag.
+# 3. This workflow checks the tag, publishes to npm and cuts a GitHub release.
+# npm trusted publishing with OIDC must be configured for this repo first.
+
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*"
+
+permissions:
+    contents: write
+    id-token: write
+
+concurrency:
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    release:
+        name: Verify, publish to npm and cut GitHub release
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+              with:
+                  fetch-depth: 0
+
+            - name: Verify tag matches package version
+              run: |
+                  TAG_VERSION="${GITHUB_REF_NAME#v}"
+                  PKG_VERSION="$(node -p "require('./package.json').version")"
+                  if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+                    echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION." >&2
+                    echo "Update CHANGELOG.md, run 'npm version <version>' and push the matching tag." >&2
+                    exit 1
+                  fi
+
+            - name: Setup Node.js
+              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+              with:
+                  node-version: "26"
+                  cache: npm
+                  registry-url: "https://registry.npmjs.org"
+
+            - name: Update npm for OIDC support
+              run: npm install -g npm@latest
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Check
+              run: npm run check
+
+            - name: Build
+              run: npm run build
+
+            - name: Verify package contents
+              run: npm pack --dry-run
+
+            - name: Extract release notes from changelog
+              id: notes
+              run: |
+                  set -e
+                  VERSION="${GITHUB_REF_NAME#v}"
+                  awk -v header="## [$VERSION]" '
+                    { sub(/\r$/, "") }
+                    index($0, header " - ") == 1 { in_section = 1; next }
+                    in_section && (/^## \[/ || /^\[[^]]+\]:/) { exit }
+                    in_section && !started && /^[[:space:]]*$/ { next }
+                    in_section { started = 1; print }
+                  ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+                  if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+                    echo "CHANGELOG.md has no entry for version $VERSION; refusing to release without curated notes." >&2
+                    exit 1
+                  fi
+                  {
+                    echo "## What is Changed"
+                    echo
+                    cat "$RUNNER_TEMP/notes.md"
+                  } > "$RUNNER_TEMP/RELEASE.md"
+                  PREV_TAG="$(git describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*" --exclude "*-*" "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+                  if [ -n "$PREV_TAG" ]; then
+                    {
+                      echo
+                      echo "## Full Changelog"
+                      echo "https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${GITHUB_REF_NAME}"
+                    } >> "$RUNNER_TEMP/RELEASE.md"
+                  fi
+                  echo "body_path=$RUNNER_TEMP/RELEASE.md" >> "$GITHUB_OUTPUT"
+
+            - name: Publish to npm
+              run: npm publish --provenance --access public
+
+            - name: Pack release tarball
+              run: npm pack
+
+            - name: Publish GitHub release
+              uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  name: opencode-tui-quota-usage ${{ github.ref_name }}
+                  body_path: ${{ steps.notes.outputs.body_path }}
+                  files: "*.tgz"
+                  draft: false
+                  prerelease: false
+                  fail_on_unmatched_files: true

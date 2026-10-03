@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a problem with the plugin.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+    - type: markdown
+      attributes:
+          value: |
+              Thanks for taking the time to fill this out. The more detail you give, the faster we can help.
+              Do not paste tokens, `auth.json` contents or full API response bodies.
+
+    - type: textarea
+      id: description
+      attributes:
+          label: What happened?
+          description: A clear description of what went wrong.
+      validations:
+          required: true
+
+    - type: textarea
+      id: steps
+      attributes:
+          label: Steps to reproduce
+          description: How can we see the same thing?
+          placeholder: |
+              1. Install the plugin via `cli.json`
+              2. Restart OpenCode
+              3. ...
+      validations:
+          required: true
+
+    - type: textarea
+      id: expected
+      attributes:
+          label: What did you expect?
+          description: What should have happened instead?
+      validations:
+          required: true
+
+    - type: input
+      id: version
+      attributes:
+          label: Plugin version
+          description: Which published version are you running?
+          placeholder: "e.g. 0.1.0"
+      validations:
+          required: true
+
+    - type: input
+      id: environment
+      attributes:
+          label: Environment
+          description: OpenCode version, Node.js version and OS.
+          placeholder: "e.g. OpenCode 2.x, Node 26.4.0, Windows 11"
+      validations:
+          required: true
+
+    - type: textarea
+      id: logs
+      attributes:
+          label: Logs
+          description: |
+              Enable OpenCode debug logs and paste the relevant portion.
+              Remove any secrets before sharing.
+          render: text
+
+    - type: textarea
+      id: extra
+      attributes:
+          label: Anything else?
+          description: Screenshots, config snippets or anything that might be relevant.
