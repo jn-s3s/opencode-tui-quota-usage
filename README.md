@@ -4,6 +4,10 @@
 [![npm license](https://img.shields.io/npm/l/opencode-tui-quota-usage)](https://github.com/jn-s3s/opencode-tui-quota-usage/blob/main/LICENSE)
 [![CI](https://github.com/jn-s3s/opencode-tui-quota-usage/actions/workflows/ci.yml/badge.svg)](https://github.com/jn-s3s/opencode-tui-quota-usage/actions/workflows/ci.yml)
 
+<p align="center">
+    <img src="https://raw.githubusercontent.com/jn-s3s/opencode-tui-quota-usage/main/docs/usage.png" alt="The OpenCode TUI with the Codex usage sidebar showing 5h 100% left, Weekly 63% left and the plan expiry date" height="300px"/>
+</p>
+
 A read-only quota sidebar for the **OpenCode V2 CLI/TUI**. It shows remaining allowance for OpenCode Go / Go Plus and Codex in separate sections. This package is a CLI-only TUI plugin, not an OpenCode V1 plugin or a server plugin.
 
 ## Install and load (V2)
