@@ -1,0 +1,79 @@
+{
+    "name": "opencode-tui-quota-usage",
+    "version": "0.1.0",
+    "description": "OpenCode quota usage sidebar tracker for OpenCode V2 CLI/TUI",
+    "keywords": [
+        "opencode",
+        "opencode-plugin",
+        "usage",
+        "quota",
+        "quota-usage",
+        "tui",
+        "cli",
+        "sidebar",
+        "codex",
+        "opencode-go",
+        "opencode-go-plus"
+    ],
+    "homepage": "https://github.com/jn-s3s/opencode-tui-quota-usage#readme",
+    "bugs": {
+        "url": "https://github.com/jn-s3s/opencode-tui-quota-usage/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/jn-s3s/opencode-tui-quota-usage.git"
+    },
+    "type": "module",
+    "license": "MIT",
+    "author": "jn-s3s <jn.s3s.github@gmail.com>",
+    "publishConfig": {
+        "access": "public"
+    },
+    "engines": {
+        "node": ">=26.4.0"
+    },
+    "main": "./dist/tui.js",
+    "exports": {
+        ".": "./dist/tui.js",
+        "./tui": "./dist/tui.js",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist/tui.js",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run tests",
+        "lint": "oxlint",
+        "lint:fix": "oxlint --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "check": "npm run lint && npm run typecheck && npm run format:check && npm run test"
+    },
+    "dependencies": {
+        "@opencode/plugin": "2.0.18"
+    },
+    "peerDependencies": {
+        "@opentui/core": ">=0.5.12",
+        "@opentui/solid": ">=0.5.12",
+        "solid-js": ">=1.9.0"
+    },
+    "devDependencies": {
+        "@opentui/core": "0.5.12",
+        "@opentui/solid": "0.5.12",
+        "@types/node": "^26.6.3",
+        "esbuild": "^0.28.2",
+        "oxlint": "^1.86.0",
+        "prettier": "^3.9.9",
+        "solid-js": "1.9.12",
+        "typescript": "^5.6.0",
+        "vitest": "^4.1.11"
+    },
+    "optionalDependencies": {
+        "@github/keytar": "7.10.6"
+    }
+}
