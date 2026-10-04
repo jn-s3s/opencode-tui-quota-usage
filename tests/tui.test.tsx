@@ -1,4 +1,10 @@
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createSignal } from "solid-js";
+
+vi.mock("solid-js", async (importOriginal) => {
+    const solid = await importOriginal<typeof import("solid-js")>();
+    return { ...solid, createSignal: vi.fn(solid.createSignal) };
+});
 
 // Mock Windows platform so credential prompt tests work on Linux CI
 const originalPlatform = process.platform;
@@ -12,6 +18,8 @@ afterAll(() => {
 const codex = vi.hoisted(() => ({
     usage: vi.fn(),
     activeUntil: vi.fn(),
+    status: vi.fn(() => "unavailable"),
+    backoff: vi.fn(() => ({ nextAllowedAt: 0, remainingMs: 0 })),
 }));
 
 const opencode = vi.hoisted(() => ({
@@ -38,8 +46,8 @@ const makeVaultError = (
 vi.mock("../src/codex/index", () => ({
     fetchCodexUsage: codex.usage,
     fetchCodexActiveUntil: codex.activeUntil,
-    codexStatusOf: () => "unavailable",
-    getCodexBackoff: () => ({ nextAllowedAt: 0, remainingMs: 0 }),
+    codexStatusOf: codex.status,
+    getCodexBackoff: codex.backoff,
 }));
 
 vi.mock("../src/opencode/index", () => ({
@@ -71,6 +79,7 @@ import tui, {
 } from "../src/tui";
 import type { RowTheme } from "../src/tui";
 import type { UsageWindow } from "../src/usage";
+import { PROVIDERS } from "../src/providers";
 
 /** Shape of a single provider entry in sidebar state. */
 type Entry = {
@@ -79,6 +88,7 @@ type Entry = {
     activeUntil?: string;
     accessEndsAt?: string;
     fetchedAt: number;
+    metadataFetchedAt?: number;
     status: string;
     rateLimitedUntil?: number;
 };
@@ -93,6 +103,37 @@ const codexWindowsPayload = { fiveHour: { percentLeft: 70 }, week: { percentLeft
 const settle = async () => {
     for (let index = 0; index < 10; index++) await Promise.resolve();
 };
+
+/**
+ * Match the sidebar state signal by its exact initial value shape, so an
+ * unrelated `createSignal` can never be mistaken for it.
+ */
+const isSidebarStateSeed = (initial: unknown): initial is { providers: Entry } =>
+    typeof initial === "object" &&
+    initial !== null &&
+    !Array.isArray(initial) &&
+    Object.keys(initial).length === 1 &&
+    "providers" in initial;
+
+/**
+ * Read the real sidebar signal without rendering native terminal components.
+ *
+ * Throws a named error when the signal is absent so a future change to the
+ * plugin's signal setup fails loudly instead of reading the wrong signal.
+ */
+function currentState(): { providers: Record<string, Entry> } {
+    const signals = vi.mocked(createSignal);
+    const index = signals.mock.calls.findIndex(([initial]) => isSidebarStateSeed(initial));
+    if (index < 0) {
+        throw new Error(
+            "currentState: no createSignal call seeded a single-key { providers } object",
+        );
+    }
+    const read = signals.mock.results[index].value[0] as () => {
+        providers: Record<string, Entry>;
+    };
+    return read();
+}
 
 /** WCAG relative luminance of a #rrggbb hex color. */
 function luminance(hex: string): number {
@@ -171,6 +212,7 @@ describe("sidebar layout", () => {
             "Reset unavailable",
             "Until Oct 3 · 2d left",
             rule,
+            "/quota-help for help",
         ]);
     });
 
@@ -186,6 +228,7 @@ describe("sidebar layout", () => {
             rule,
             "▶ Codex · PLUS",
             rule,
+            "/quota-help for help",
         ]);
         // Re-expanding restores both bodies, so "all" does not consume section state.
         expect(displayLines(state, none, now).length).toBeGreaterThan(
@@ -218,6 +261,7 @@ describe("sidebar layout", () => {
             "5h 100% left",
             "Reset unavailable",
             rule,
+            "/quota-help for help",
         ]);
     });
 
@@ -246,6 +290,7 @@ describe("sidebar layout", () => {
             "▼ Codex",
             "No data",
             rule,
+            "/quota-help for help",
         ]);
     });
 
@@ -265,6 +310,7 @@ describe("sidebar layout", () => {
             "▼ Codex",
             "No data",
             rule,
+            "/quota-help for help",
         ]);
     });
 
@@ -591,6 +637,9 @@ describe("default TUI usage refresh and optional Until lookup", () => {
     };
     beforeEach(() => {
         vi.useFakeTimers();
+        vi.mocked(createSignal).mockClear();
+        codex.status.mockReset().mockReturnValue("unavailable");
+        codex.backoff.mockReset().mockReturnValue({ nextAllowedAt: 0, remainingMs: 0 });
         codex.usage.mockReset();
         codex.activeUntil.mockReset();
         opencode.usage.mockReset();
@@ -643,13 +692,13 @@ describe("default TUI usage refresh and optional Until lookup", () => {
         );
     });
 
-    test("registers a collapse command for the main header and each usage type", async () => {
+    test("registers quota help and collapse commands", async () => {
         const dispose = await tui.setup(context());
         try {
             const ids = commands().map((entry: { id: string }) => entry.id);
             expect(ids).toEqual([
                 "quota-usage.toggle",
-                "quota-providers.help",
+                "quota-help.help",
                 "quota-opencode.toggle",
                 "quota-codex.toggle",
                 "quota-opencode-key.manage",
@@ -657,6 +706,16 @@ describe("default TUI usage refresh and optional Until lookup", () => {
                 "quota-usage.toggle.opencode",
                 "quota-usage.toggle.codex",
             ]);
+            const help = commands().find((entry: { id: string }) => entry.id === "quota-help.help");
+            expect(help).toMatchObject({
+                title: "Quota help",
+                slash: { name: "quota-help" },
+            });
+            await help.run();
+            expect(toast).toHaveBeenCalledWith({
+                message:
+                    "To show quota, enable a provider with:\n- /quota-opencode\n- /quota-codex",
+            });
         } finally {
             if (typeof dispose === "function") {
                 dispose();
@@ -853,6 +912,196 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             if (typeof dispose === "function") {
                 dispose();
             }
+        }
+    });
+
+    test("keeps metadata during delayed follow-ups, then replaces it without reverting fresh windows", async () => {
+        codex.usage.mockResolvedValueOnce({ ...codexWindowsPayload, planType: "plus" });
+        codex.activeUntil.mockResolvedValueOnce("2026-10-03T00:00:00Z");
+        opencode.status.mockResolvedValueOnce({
+            plan: "Go",
+            accessEndsAt: "2026-10-03T00:00:00Z",
+        });
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            expect(currentState().providers.codex).toMatchObject({
+                plan: "plus",
+                activeUntil: "2026-10-03T00:00:00Z",
+            });
+            expect(currentState().providers.opencode).toMatchObject({
+                plan: "Go",
+                accessEndsAt: "2026-10-03T00:00:00Z",
+            });
+            let resolveUntil!: (value: string) => void;
+            let resolveStatus!: (value: { plan: string; accessEndsAt: string }) => void;
+            codex.activeUntil.mockImplementationOnce(
+                () =>
+                    new Promise<string>((resolve) => {
+                        resolveUntil = resolve;
+                    }),
+            );
+            opencode.status.mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        resolveStatus = resolve;
+                    }),
+            );
+            codex.usage.mockResolvedValueOnce({ fiveHour: { percentLeft: 20 } });
+            opencode.usage.mockResolvedValueOnce([]);
+            await vi.advanceTimersByTimeAsync(120_000);
+            const pending = currentState();
+            expect(pending.providers.codex).toMatchObject({
+                plan: "plus",
+                activeUntil: "2026-10-03T00:00:00Z",
+                windows: [
+                    { label: "5h", usage: { percentLeft: 20 } },
+                    { label: "Weekly", usage: undefined },
+                ],
+                fetchedAt: Date.now(),
+                status: "",
+            });
+            expect(pending.providers.opencode).toMatchObject({
+                plan: "Go",
+                accessEndsAt: "2026-10-03T00:00:00Z",
+                windows: [],
+                fetchedAt: Date.now(),
+                status: "",
+            });
+            resolveUntil("2026-10-05T00:00:00Z");
+            resolveStatus({ plan: "Go Plus", accessEndsAt: "2026-10-06T00:00:00Z" });
+            await settle();
+            expect(currentState().providers.codex.activeUntil).toBe("2026-10-05T00:00:00Z");
+            expect(currentState().providers.opencode).toMatchObject({
+                plan: "Go Plus",
+                accessEndsAt: "2026-10-06T00:00:00Z",
+            });
+            expect(currentState().providers.codex.windows).toEqual(pending.providers.codex.windows);
+            expect(currentState().providers.opencode.windows).toEqual([]);
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test.each(["undefined", "missing fields", "undefined fields", "rejected"])(
+        "retains last known metadata when optional follow-ups return %s",
+        async (outcome) => {
+            codex.usage.mockResolvedValueOnce({ ...codexWindowsPayload, planType: "plus" });
+            codex.activeUntil.mockResolvedValueOnce("2026-10-03T00:00:00Z");
+            opencode.status.mockResolvedValueOnce({
+                plan: "Go Plus",
+                accessEndsAt: "2026-10-04T00:00:00Z",
+            });
+            const dispose = await tui.setup(context());
+            try {
+                await settle();
+                if (outcome === "rejected") {
+                    codex.activeUntil.mockRejectedValueOnce(new Error("optional lookup failed"));
+                    opencode.status.mockRejectedValueOnce(new Error("optional lookup failed"));
+                } else {
+                    codex.activeUntil.mockResolvedValueOnce(undefined);
+                    opencode.status.mockResolvedValueOnce(
+                        outcome === "undefined"
+                            ? undefined
+                            : outcome === "missing fields"
+                              ? {}
+                              : { plan: undefined, accessEndsAt: undefined },
+                    );
+                }
+                await vi.advanceTimersByTimeAsync(120_000);
+                expect(currentState().providers.codex).toMatchObject({
+                    plan: "plus",
+                    activeUntil: "2026-10-03T00:00:00Z",
+                    status: "",
+                });
+                expect(currentState().providers.opencode).toMatchObject({
+                    plan: "Go Plus",
+                    accessEndsAt: "2026-10-04T00:00:00Z",
+                    status: "",
+                });
+            } finally {
+                if (typeof dispose === "function") dispose();
+            }
+        },
+    );
+
+    test("defined usage metadata replaces prior values before the optional follow-up", async () => {
+        const provider = PROVIDERS.find((entry) => entry.id === "codex")!;
+        const load = vi.spyOn(provider, "load");
+        load.mockResolvedValueOnce({
+            windows: codexWindows,
+            plan: "plus",
+            activeUntil: "2026-10-03T00:00:00Z",
+            accessEndsAt: "2026-10-04T00:00:00Z",
+        });
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            load.mockResolvedValueOnce({
+                windows: [],
+                plan: "pro",
+                activeUntil: "2026-10-05T00:00:00Z",
+                accessEndsAt: "",
+            });
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(currentState().providers.codex).toMatchObject({
+                windows: [],
+                plan: "pro",
+                activeUntil: "2026-10-05T00:00:00Z",
+                accessEndsAt: "",
+                status: "",
+            });
+        } finally {
+            load.mockRestore();
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("successful usage keeps only metadata from an old error and cooldown snapshot", async () => {
+        codex.usage.mockResolvedValueOnce({ ...codexWindowsPayload, planType: "plus" });
+        codex.activeUntil.mockResolvedValueOnce("2026-10-03T00:00:00Z");
+        opencode.status.mockResolvedValueOnce({ plan: "Go", accessEndsAt: "2026-10-04T00:00:00Z" });
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            codex.status.mockReturnValue("rate-limited");
+            codex.backoff.mockReturnValue({
+                nextAllowedAt: Date.now() + 600_000,
+                remainingMs: 600_000,
+            });
+            codex.usage.mockRejectedValueOnce(new Error("rate limited"));
+            opencode.usage.mockRejectedValueOnce(new Error("unavailable"));
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(currentState().providers.codex.status).toBe("Rate limited · retry later");
+            expect(currentState().providers.codex.rateLimitedUntil).toBeGreaterThan(Date.now());
+            expect(currentState().providers.opencode.status).toBe("Unavailable");
+
+            codex.usage.mockResolvedValueOnce({ fiveHour: { percentLeft: 10 }, planType: "pro" });
+            opencode.usage.mockResolvedValueOnce([]);
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(currentState().providers.codex).toEqual({
+                windows: [
+                    { label: "5h", usage: { percentLeft: 10 } },
+                    { label: "Weekly", usage: undefined },
+                ],
+                plan: "pro",
+                activeUntil: "2026-10-03T00:00:00Z",
+                accessEndsAt: undefined,
+                fetchedAt: Date.now(),
+                metadataFetchedAt: expect.any(Number),
+                status: "",
+            });
+            expect(currentState().providers.opencode).toEqual({
+                windows: [],
+                plan: "Go",
+                activeUntil: undefined,
+                accessEndsAt: "2026-10-04T00:00:00Z",
+                fetchedAt: Date.now(),
+                metadataFetchedAt: expect.any(Number),
+                status: "",
+            });
+        } finally {
+            if (typeof dispose === "function") dispose();
         }
     });
 
@@ -1499,7 +1748,14 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             { codex: false, opencode: false },
         );
         expect(rows.some((row) => row.text.includes("Choose a provider"))).toBe(true);
-        expect(rows.some((row) => row.text.includes("Disabled · /quota-codex"))).toBe(true);
+        expect(rows.some((row) => row.text.includes("Disabled ·"))).toBe(false);
+        expect(rows.filter((row) => row.toggle && row.toggle !== "all")).toHaveLength(0);
+        expect(rows.filter((row) => row.separator)).toHaveLength(1);
+        expect(rows.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
+        expect(rows.at(-2)?.text).toContain("Choose a provider");
+        expect(rows.at(-1)?.muted).toBe(true);
+        expect(rows.at(-1)?.rightAlign).toBe(true);
+        expect(rows.slice(0, -1).some((row) => row.rightAlign)).toBe(false);
         expect(rows.some((row) => row.text.includes("70% left"))).toBe(false);
         const oneEnabled = layoutRows(
             { providers: { codex: { windows: codexWindows, fetchedAt: now, status: "" } } },
@@ -1507,11 +1763,96 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             now,
             { codex: true, opencode: false },
         );
-        expect(oneEnabled.some((row) => row.text.includes("Choose a provider"))).toBe(false);
         expect(oneEnabled.some((row) => row.text.includes("70% left"))).toBe(true);
-        expect(oneEnabled.some((row) => row.text.includes("Disabled · /quota-opencode"))).toBe(
-            true,
+        expect(oneEnabled.some((row) => row.text === "Also disabled: /quota-opencode")).toBe(true);
+        expect(oneEnabled.filter((row) => row.separator)).toHaveLength(2);
+        expect(oneEnabled.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
+
+        const opencodeOnly = layoutRows(
+            {
+                providers: {
+                    codex: { windows: [], fetchedAt: now, status: "" },
+                    opencode: { windows: [], fetchedAt: now, status: "" },
+                },
+            },
+            new Set(),
+            now,
+            { codex: false, opencode: true },
         );
+        expect(opencodeOnly.some((row) => row.toggle === "codex")).toBe(false);
+        expect(opencodeOnly.some((row) => row.toggle === "opencode")).toBe(true);
+        expect(opencodeOnly.filter((row) => row.separator)).toHaveLength(2);
+        expect(opencodeOnly.some((row) => row.text === "Also disabled: /quota-codex")).toBe(true);
+
+        const noneOff = layoutRows(
+            { providers: { codex: { windows: codexWindows, fetchedAt: now, status: "" } } },
+            new Set(),
+            now,
+            { codex: true, opencode: true },
+        );
+        expect(noneOff.some((row) => row.text.includes("Choose a provider"))).toBe(false);
+        expect(noneOff.some((row) => row.text.includes("Also disabled"))).toBe(false);
+
+        const restored = layoutRows(
+            { providers: { codex: { windows: codexWindows, fetchedAt: now, status: "" } } },
+            new Set(),
+            now,
+            { codex: true, opencode: true },
+        );
+        expect(restored.some((row) => row.toggle === "codex")).toBe(true);
+        expect(restored.some((row) => row.toggle === "opencode")).toBe(true);
+        expect(restored.filter((row) => row.separator)).toHaveLength(3);
+        expect(restored.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
+
+        const collapsed = layoutRows(
+            { providers: { codex: { windows: codexWindows, fetchedAt: now, status: "" } } },
+            new Set(["all"]),
+            now,
+            { codex: true, opencode: false },
+        );
+        expect(collapsed.at(-2)?.separator).toBe(true);
+        expect(collapsed.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
+    });
+
+    test("a carried-over subscription boundary is marked stale once it ages out", () => {
+        const now = Date.now();
+        const fresh = layoutRows(
+            {
+                providers: {
+                    codex: {
+                        windows: codexWindows,
+                        activeUntil: "2026-10-05T00:00:00Z",
+                        fetchedAt: now,
+                        metadataFetchedAt: now,
+                        status: "",
+                    },
+                },
+            },
+            new Set(),
+            now,
+            { codex: true, opencode: false },
+        );
+        expect(
+            fresh.some((row) => row.text.startsWith("Until") && !row.text.includes("stale")),
+        ).toBe(true);
+
+        const aged = layoutRows(
+            {
+                providers: {
+                    codex: {
+                        windows: codexWindows,
+                        activeUntil: "2026-10-05T00:00:00Z",
+                        fetchedAt: now,
+                        metadataFetchedAt: now - 10 * 60_000,
+                        status: "",
+                    },
+                },
+            },
+            new Set(),
+            now,
+            { codex: true, opencode: false },
+        );
+        expect(aged.some((row) => row.text.includes("(stale)"))).toBe(true);
     });
 
     test("enabling another provider while a request is pending refreshes both enabled providers", async () => {
