@@ -1,6 +1,6 @@
 {
     "name": "opencode-tui-quota-usage",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "OpenCode quota usage sidebar tracker for OpenCode V2 CLI/TUI",
     "keywords": [
         "opencode",

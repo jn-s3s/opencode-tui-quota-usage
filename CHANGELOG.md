@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-04
+
+### Fixed
+
+- The sidebar header read the plugin name and version from hardcoded constants, so it kept showing `0.1.0` after the package had moved to `0.2.0`. Both values are now read from `package.json` at build time, so the header tracks the released version automatically.
+
 ## [0.2.0] - 2026-10-04
 
 ### Changed
@@ -27,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI commands `/quota-usage` for sidebar visibility, `/quota-providers` for setup guidance and `/quota-opencode-key` for Go credential and org ID management.
 - Independently collapsible provider sections, a refresh for enabled providers every 2 minutes, a 30 second countdown clock and warning or critical thresholds at 45% and 10% left.
 
-[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/releases/tag/v0.1.0

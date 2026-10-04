@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createSignal } from "solid-js";
+import packageJson from "../package.json";
 
 vi.mock("solid-js", async (importOriginal) => {
     const solid = await importOriginal<typeof import("solid-js")>();
@@ -71,6 +72,8 @@ import tui, {
     meterPercent,
     parseActiveUntil,
     planLabel,
+    PROJECT_NAME,
+    PROJECT_VERSION,
     rowColors,
     USAGE_COLORS,
     usageColor,
@@ -153,6 +156,11 @@ function contrast(a: string, b: string): number {
 }
 
 describe("sidebar layout", () => {
+    test("exports the current package metadata", () => {
+        expect(PROJECT_NAME).toBe(packageJson.name);
+        expect(PROJECT_VERSION).toBe(packageJson.version);
+    });
+
     const now = Date.parse("2026-10-01T12:00:00Z");
     const none = new Set<string>();
     const rule = "─".repeat(20);
@@ -199,7 +207,7 @@ describe("sidebar layout", () => {
                 now,
             ),
         ).toEqual([
-            "▼ opencode-tui-quota-usage (0.1.0)",
+            `▼ ${packageJson.name} (${packageJson.version})`,
             rule,
             "▼ OpenCode · GO PLUS",
             "5h 70% left",
@@ -222,7 +230,7 @@ describe("sidebar layout", () => {
             codex: { plan: "plus", windows: [{ label: "5h", usage: { percentLeft: 100 } }] },
         });
         expect(displayLines(state, new Set(["all"]), now)).toEqual([
-            "▶ opencode-tui-quota-usage (0.1.0)",
+            `▶ ${packageJson.name} (${packageJson.version})`,
             rule,
             "▶ OpenCode · GO PLUS",
             rule,
@@ -253,7 +261,7 @@ describe("sidebar layout", () => {
                 now,
             ),
         ).toEqual([
-            "▼ opencode-tui-quota-usage (0.1.0)",
+            `▼ ${packageJson.name} (${packageJson.version})`,
             rule,
             "▶ OpenCode · GO PLUS",
             rule,
@@ -279,7 +287,7 @@ describe("sidebar layout", () => {
                 now,
             ),
         ).toEqual([
-            "▼ opencode-tui-quota-usage (0.1.0)",
+            `▼ ${packageJson.name} (${packageJson.version})`,
             rule,
             "▼ OpenCode",
             "5h 100% left",
@@ -302,7 +310,7 @@ describe("sidebar layout", () => {
                 now,
             ),
         ).toEqual([
-            "▼ opencode-tui-quota-usage (0.1.0)",
+            `▼ ${packageJson.name} (${packageJson.version})`,
             rule,
             "▼ OpenCode",
             "Set OPENCODE_QUOTA_GO_API_KEY",
