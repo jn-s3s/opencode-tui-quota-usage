@@ -2,9 +2,10 @@ name: CI
 
 on:
     push:
-        branches: [main]
+        branches: [main, dev]
     pull_request:
-        branches: [main]
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches: [main, dev]
     workflow_dispatch:
 
 permissions:
@@ -51,3 +52,67 @@ jobs:
 
             - name: Verify package contents
               run: npm pack --dry-run
+
+    changelog-gate:
+        name: Changelog gate
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        runs-on: windows-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Node.js
+              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+              with:
+                  node-version: "26"
+
+            - name: Verify changelog is release ready
+              run: |
+                  $content = Get-Content -Raw CHANGELOG.md
+
+                  $unreleased = [regex]::Match($content, '(?ms)^## \[Unreleased\]\r?\n(.*?)(?=^## \[)')
+                  if (-not $unreleased.Success) {
+                      throw "CHANGELOG.md has no ## [Unreleased] section."
+                  }
+                  if ($unreleased.Groups[1].Value.Trim()) {
+                      throw "## [Unreleased] must be empty before merging to main; run the changelog update first."
+                  }
+
+                  $versionMatch = [regex]::Match($content, '(?m)^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}')
+                  if (-not $versionMatch.Success) {
+                      throw "No dated version section found in CHANGELOG.md."
+                  }
+                  $version = $versionMatch.Groups[1].Value
+
+                  # The code constant leads and the changelog follows it, so package.json
+                  # must already carry the version this release publishes. release.yml
+                  # copies this same command to check the pushed tag.
+                  $appVersion = node -p "require('./package.json').version"
+                  if ($LASTEXITCODE -ne 0 -or -not $appVersion) {
+                      throw "Could not read the version from package.json (node exited $LASTEXITCODE)."
+                  }
+                  $appVersion = $appVersion.Trim()
+                  if ($appVersion -ne $version) {
+                      throw "CHANGELOG.md releases v$version but package.json declares v$appVersion; retitle the CHANGELOG section to v$appVersion or run 'npm version $version' before merging to main."
+                  }
+
+                  # Refresh tags first: the checkout's tag refs can be stale or missing.
+                  git fetch --tags --force
+                  if (git tag --list "v$version") {
+                      throw "Tag v$version already exists; CHANGELOG.md has no new version to release."
+                  }
+
+                  # [version] casts compare numerically; a string compare would misorder.
+                  # The glob also matches suffix tags like v0.0.0-test, which cannot be
+                  # cast, so keep only plain vX.Y.Z tags. release.yml skips pre-releases
+                  # the same way when it picks the previous tag for the compare link.
+                  $latestTag = git tag --list "v*.*.*" --sort=-v:refname |
+                      Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+                      Select-Object -First 1
+                  if ($latestTag -and ([version]$version -le [version]$latestTag.TrimStart('v'))) {
+                      throw "Changelog version v$version is not newer than the latest tag $latestTag."
+                  }
+
+                  Write-Host "Changelog gate passed: v$version is ready to release."
