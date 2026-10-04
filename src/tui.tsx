@@ -42,6 +42,7 @@ interface ProviderEntry {
     activeUntil?: string;
     accessEndsAt?: string;
     fetchedAt: number;
+    metadataFetchedAt?: number;
     status: string;
     rateLimitedUntil?: number;
 }
@@ -83,6 +84,8 @@ export interface DisplayRow {
     separator?: boolean;
     /** Collapse key this row toggles; absent on non-collapsible rows. */
     toggle?: string;
+    /** Align this text row to the trailing edge of the sidebar. */
+    rightAlign?: boolean;
 }
 
 /**
@@ -323,7 +326,6 @@ function sectionRows(
     provider: { id: string; label: string },
     expanded: boolean,
     nowMs: number,
-    enabled = true,
 ): DisplayRow[] {
     const section: UsageSection = {
         id: provider.id,
@@ -333,10 +335,6 @@ function sectionRows(
         fetchedAt: entry?.fetchedAt ?? 0,
     };
     const rows = [sectionHeader(section, expanded)];
-    if (!enabled) {
-        if (expanded) rows.push({ text: `Disabled · /quota-${provider.id}`, muted: true });
-        return rows;
-    }
     if (!expanded) {
         return rows;
     }
@@ -345,10 +343,13 @@ function sectionRows(
     if (!section.windows.length) {
         rows.push({ text: status || "No data", muted: true });
     }
+    const metadataStale =
+        entry?.metadataFetchedAt !== undefined && nowMs - entry.metadataFetchedAt > STALE_MS;
+    const boundarySuffix = metadataStale ? " (stale)" : "";
     const activeUntilMs = parseActiveUntil(entry?.activeUntil);
     if (provider.id !== "opencode" && activeUntilMs !== undefined) {
         rows.push({
-            text: formatActiveUntil(activeUntilMs, nowMs),
+            text: `${formatActiveUntil(activeUntilMs, nowMs)}${boundarySuffix}`,
             muted: true,
             severity: activeUntilIsCritical(activeUntilMs, nowMs) ? "critical" : undefined,
         });
@@ -357,7 +358,7 @@ function sectionRows(
         provider.id === "opencode" ? parseActiveUntil(entry?.accessEndsAt) : undefined;
     if (accessEndsAt !== undefined) {
         rows.push({
-            text: formatActiveUntil(accessEndsAt, nowMs),
+            text: `${formatActiveUntil(accessEndsAt, nowMs)}${boundarySuffix}`,
             muted: true,
             severity: activeUntilIsCritical(accessEndsAt, nowMs) ? "critical" : undefined,
         });
@@ -420,22 +421,32 @@ export function layoutRows(
         },
         SEPARATOR,
     ];
-    if (enabled && !Object.values(enabled).some(Boolean)) {
-        rows.push({ text: "Choose a provider: /quota-codex or /quota-opencode", muted: true });
+    const disabled = enabled
+        ? PROVIDERS.filter((provider) => enabled[provider.id as ProviderId] !== true)
+        : [];
+    if (disabled.length > 0) {
+        rows.push({
+            text:
+                disabled.length === PROVIDERS.length
+                    ? `Choose a provider: ${PROVIDERS.map((provider) => `/quota-${provider.id}`).join(" or ")}`
+                    : `Also disabled: ${disabled.map((provider) => `/quota-${provider.id}`).join(", ")}`,
+            muted: true,
+        });
     }
     for (const provider of PROVIDERS) {
+        if (enabled && enabled[provider.id as ProviderId] !== true) continue;
         rows.push(
             ...sectionRows(
                 current.providers[provider.id],
                 provider,
                 allOpen && !collapsed.has(provider.id),
                 nowMs,
-                enabled ? enabled[provider.id as ProviderId] === true : true,
             ),
         );
         // Each section closes with its own rule, matching the header rule.
         rows.push(SEPARATOR);
     }
+    rows.push({ text: "/quota-help for help", muted: true, rightAlign: true });
     return rows;
 }
 
@@ -560,12 +571,30 @@ export default Plugin.define({
                 if (disposed || !shown() || signal.aborted || current !== generation) {
                     return;
                 }
-                setState((previous) => ({
-                    providers: {
-                        ...previous.providers,
-                        [provider.id]: { ...result, fetchedAt: Date.now(), status: "" },
-                    },
-                }));
+                const fetchedAt = Date.now();
+                const confirmsMetadata =
+                    result.plan !== undefined ||
+                    result.activeUntil !== undefined ||
+                    result.accessEndsAt !== undefined;
+                setState((previous) => {
+                    const carried = previous.providers[provider.id];
+                    return {
+                        providers: {
+                            ...previous.providers,
+                            [provider.id]: {
+                                ...result,
+                                plan: result.plan ?? carried?.plan,
+                                activeUntil: result.activeUntil ?? carried?.activeUntil,
+                                accessEndsAt: result.accessEndsAt ?? carried?.accessEndsAt,
+                                metadataFetchedAt: confirmsMetadata
+                                    ? fetchedAt
+                                    : carried?.metadataFetchedAt,
+                                fetchedAt,
+                                status: "",
+                            },
+                        },
+                    };
+                });
                 if (!provider.followUp) {
                     return;
                 }
@@ -600,6 +629,7 @@ export default Plugin.define({
                                               ...(followUp.accessEndsAt !== undefined
                                                   ? { accessEndsAt: followUp.accessEndsAt }
                                                   : {}),
+                                              metadataFetchedAt: Date.now(),
                                           },
                                       },
                                   }
@@ -1048,13 +1078,14 @@ export default Plugin.define({
                                 },
                             },
                             {
-                                id: "quota-providers.help",
-                                title: "Quota providers setup help",
-                                slash: { name: "quota-providers" },
+                                id: "quota-help.help",
+                                title: "Quota help",
+                                slash: { name: "quota-help" },
                                 run: () =>
                                     context.ui.toast.show({
-                                        message:
-                                            "Enable providers with /quota-codex or /quota-opencode",
+                                        message: `To show quota, enable a provider with:\n${PROVIDERS.map(
+                                            (provider) => `- /quota-${provider.id}`,
+                                        ).join("\n")}`,
                                     }),
                             },
                             ...PROVIDERS.map((provider) => ({
@@ -1141,8 +1172,14 @@ export default Plugin.define({
                                             </box>
                                         ) : (
                                             <text
-                                                width={row.reset ? "100%" : undefined}
-                                                textAlign={row.reset ? "right" : undefined}
+                                                width={
+                                                    row.reset || row.rightAlign ? "100%" : undefined
+                                                }
+                                                textAlign={
+                                                    row.reset || row.rightAlign
+                                                        ? "right"
+                                                        : undefined
+                                                }
                                                 wrapMode="none"
                                                 truncate
                                                 fg={colors.text}
