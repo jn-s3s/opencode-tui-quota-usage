@@ -1,0 +1,68 @@
+name: Tag release
+
+on:
+    push:
+        branches: [main]
+
+permissions:
+    contents: read
+
+concurrency:
+    group: tag-release-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    tag:
+        name: Tag version from changelog
+        runs-on: windows-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Create and push version tag
+              env:
+                  RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+              run: |
+                  if (-not $env:RELEASE_PAT) {
+                      throw "RELEASE_PAT is missing or empty; required to push v* tags past the tag ruleset."
+                  }
+
+                  $content = Get-Content -Raw CHANGELOG.md
+                  $versionMatch = [regex]::Match($content, '(?m)^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}')
+                  if (-not $versionMatch.Success) {
+                      throw "No dated version section found in CHANGELOG.md; refusing to tag."
+                  }
+                  $version = $versionMatch.Groups[1].Value
+                  $tag = "v$version"
+
+                  git fetch --tags --force
+                  if (git tag --list $tag) {
+                      # Dated sections must run newest first: a higher version below the
+                      # tagged top one would sit there untagged and never be released.
+                      $highest = [regex]::Matches($content, '(?m)^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}') |
+                          ForEach-Object { [version]$_.Groups[1].Value } |
+                          Sort-Object -Descending |
+                          Select-Object -First 1
+                      if ($highest -gt [version]$version) {
+                          throw "CHANGELOG.md lists v$highest below the already tagged v$version; move v$highest to the top of the dated sections so it gets released."
+                      }
+
+                      Write-Host "Tag $tag already exists; nothing to do."
+                      # Not a failure: rerunning this workflow is a no-op.
+                      exit 0
+                  }
+
+                  # A lightweight tag is a plain ref write, so no committer identity is
+                  # configured; only -a, -s or -m would need one.
+                  git tag $tag
+
+                  # The default GITHUB_TOKEN cannot create v* tags under the tag
+                  # protection ruleset, and its pushes would not trigger the release
+                  # workflow, so the push authenticates with a PAT that belongs to a
+                  # ruleset bypass actor. Reading refs needs no credential, so the
+                  # token stays on this command instead of on the fetch above.
+                  $repoUrl = "https://x-access-token:$env:RELEASE_PAT@github.com/${{ github.repository }}.git"
+                  git push $repoUrl $tag
