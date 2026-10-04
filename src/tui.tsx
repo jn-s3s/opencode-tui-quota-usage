@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createSignal, For, untrack } from "solid-js";
+import packageJson from "../package.json";
 import { createGoProvider, PROVIDERS, statusNote } from "./providers";
 import {
     clearWindowsGoCredentials,
@@ -17,8 +18,8 @@ const PERCENT_LEFT_CRITICAL = 10;
 const PERCENT_LEFT_WARNING = 45;
 
 /** Package name and version shown in the main header row. */
-export const PROJECT_NAME = "opencode-tui-quota-usage";
-export const PROJECT_VERSION = "0.1.0";
+export const PROJECT_NAME = packageJson.name;
+export const PROJECT_VERSION = packageJson.version;
 type ProviderId = "codex" | "opencode";
 type ProviderEnablement = Record<ProviderId, boolean>;
 const noop = () => {};
