@@ -694,6 +694,37 @@ describe("OpenCode antigravity-accounts.json parsing, token exchange, caching an
             projectId: "proj-beta",
         });
 
+        // Does not leak a hint's embedded projectId onto a non-matching fallback account
+        const poolWithoutProjectOnActive = JSON.stringify({
+            version: 4,
+            activeIndex: 0,
+            accounts: [
+                {
+                    id: "id-alpha",
+                    email: "alpha@example.com",
+                    refreshToken: "1//refresh_alpha",
+                },
+            ],
+        });
+        expect(
+            parseOpenCodeAntigravityAccounts(poolWithoutProjectOnActive, {
+                email: "other@example.com",
+                refreshToken: "1//refresh_other|proj-other|managed-other",
+            }),
+        ).toEqual({
+            refreshToken: "1//refresh_alpha",
+            accountKey: expect.any(String),
+        });
+        expect(
+            parseOpenCodeAntigravityAccounts(poolWithoutProjectOnActive, {
+                email: "alpha@example.com",
+                refreshToken: "1//refresh_alpha|proj-alpha|managed-alpha",
+            }),
+        ).toMatchObject({
+            refreshToken: "1//refresh_alpha",
+            projectId: "managed-alpha",
+        });
+
         // Rejects unsupported version, empty accounts, all disabled, or unsafe refreshToken without leaking secrets
         const secret = "1//SUPER_SECRET_REFRESH_TOKEN";
         for (const bad of [

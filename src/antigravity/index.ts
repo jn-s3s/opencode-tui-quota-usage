@@ -665,8 +665,9 @@ export function parseOpenCodeAntigravityAccounts(
     };
 
     const byFamily = isRecord(parsed.activeIndexByFamily) ? parsed.activeIndexByFamily : undefined;
+    const matchedByHint = findAccountByHint(accounts, hint);
     const selected =
-        findAccountByHint(accounts, hint) ??
+        matchedByHint ??
         pickAtIndex(parsed.activeIndex) ??
         pickAtIndex(byFamily?.gemini) ??
         pickAtIndex(byFamily?.claude) ??
@@ -698,7 +699,9 @@ export function parseOpenCodeAntigravityAccounts(
     }
 
     const hintParts =
-        typeof hint?.refreshToken === "string" ? hint.refreshToken.trim().split("|") : [];
+        selected === matchedByHint && typeof hint?.refreshToken === "string"
+            ? hint.refreshToken.trim().split("|")
+            : [];
     const hintEmbeddedProject = hintParts[1];
     const hintEmbeddedManagedProject = hintParts[2];
 
@@ -921,7 +924,7 @@ function readBoundedFile(path: string): string {
         if (stat.size > MAX_AUTH_BYTES) {
             throw new AntigravityProviderError("missing-login", "Antigravity auth file too large");
         }
-        const buffer = Buffer.alloc(MAX_AUTH_BYTES + 1);
+        const buffer = Buffer.alloc(Math.min(Math.max(stat.size, 256) + 1, MAX_AUTH_BYTES + 1));
         let bytes = 0;
         while (bytes < buffer.length) {
             const count = readSync(fd, buffer, bytes, buffer.length - bytes, null);
