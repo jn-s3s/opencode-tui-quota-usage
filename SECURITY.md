@@ -13,7 +13,7 @@ If that form is unavailable, email the maintainer listed in `package.json`. The 
 ## What to include
 
 - The affected version and where the problem lives, for example a credential path or an endpoint call.
-- Steps to reproduce, without pasting a real API key, token or `auth.json` contents.
+- Steps to reproduce, without pasting a real API key, token, auth file, or account JSON contents.
 - A proof of concept that stays within accounts you control.
 
 ## Scope

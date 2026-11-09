@@ -12,8 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Antigravity quota section showing Gemini, Claude/GPT, and Argon usage windows as percent-left meters with reset countdowns, disabled by default until enabled with `/quota-antigravity`.
-- Token discovery and automatic account switching for Antigravity, resolving active accounts from OpenCode configuration or falling back to the Antigravity CLI keyring session and token cache.
+- Token discovery and automatic account switching for Antigravity, resolving active accounts from `opencode-antigravity-auth` configuration or falling back to the Antigravity CLI keyring session and token cache.
+- Event-driven account synchronization with OpenCode `/connect` Google credentials on `credential.switched` and `credential.updated`.
 - Per-account rate limit backoff and cooldown tracking for Antigravity requests returning HTTP 429.
+- Command palette action "Toggle Antigravity section" to collapse or expand the Antigravity display.
+- Custom OAuth client overrides via `OPENCODE_ANTIGRAVITY_CLIENT_ID` and `OPENCODE_ANTIGRAVITY_CLIENT_SECRET`.
 
 ### Changed
 

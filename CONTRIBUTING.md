@@ -38,7 +38,7 @@ npm run format        # rewrite files with Prettier
 
 ## Tests
 
-Tests live under `tests/` and use synthetic JSON, fake fetches and stubbed TUI behavior, so they need no live credentials or network access. Never add a real API key, token or `auth.json` contents to a test.
+Tests live under `tests/` and use synthetic JSON, fake fetches and stubbed TUI behavior, so they need no live credentials or network access. Never add a real API key, token, `auth.json`, or `antigravity-accounts.json` contents to a test.
 
 ## Pull requests
 
