@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-10
+
+### Changed
+
+- Configured Dependabot to ignore major version updates for TypeScript, preventing peer dependency conflicts with `@opentui/core`.
+- Updated `softprops/action-gh-release` to 3.0.4 in the release workflow.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
@@ -53,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI commands `/quota-usage` for sidebar visibility, `/quota-providers` for setup guidance and `/quota-opencode-key` for Go credential and org ID management.
 - Independently collapsible provider sections, a refresh for enabled providers every 2 minutes, a 30 second countdown clock and warning or critical thresholds at 45% and 10% left.
 
-[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.1.0...v0.2.0
