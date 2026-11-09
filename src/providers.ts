@@ -205,11 +205,14 @@ const codexProvider: Provider = {
  * Antigravity: grouped model quota windows (Gemini, Claude/GPT, and separate
  * Pro-plan Argon weekly when reported) plus optional subscription tier lookup.
  */
+let antigravityNeedsFollowUp = false;
 const antigravityProvider: Provider = {
     id: "antigravity",
     label: "Antigravity",
     load: async (signal): Promise<ProviderResult> => {
+        antigravityNeedsFollowUp = false;
         const result = await fetchAntigravityUsage(signal);
+        antigravityNeedsFollowUp = result.plan === undefined;
         return {
             windows: result.windows,
             ...(result.plan ? { plan: result.plan } : {}),
@@ -223,7 +226,13 @@ const antigravityProvider: Provider = {
         }
         return { until: backoff.nextAllowedAt };
     },
-    followUp: (signal) => fetchAntigravityStatus(signal),
+    followUp: (signal) => {
+        if (!antigravityNeedsFollowUp) {
+            return Promise.resolve(undefined);
+        }
+        antigravityNeedsFollowUp = false;
+        return fetchAntigravityStatus(signal);
+    },
 };
 
 /** Every tracked usage type, in sidebar display order. */

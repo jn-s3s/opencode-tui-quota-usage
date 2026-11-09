@@ -470,6 +470,16 @@ describe("Antigravity CLI credential parsing and reading (synthetic only)", () =
         };
         const fallback = await readAntigravityAuth(dir, undefined, async () => emptyKeyring);
         expect(fallback.accessToken).toBe("ya29.fallback_file");
+
+        // Corrupt non-empty keyring entry fails closed instead of silently falling back to disk
+        const corruptKeyring: KeyringReader = {
+            getPassword: async () => "{corrupt-json",
+            findPassword: async () => null,
+        };
+        const corruptErr = await caughtRejection(
+            readAntigravityAuth(dir, undefined, async () => corruptKeyring),
+        );
+        expect(antigravityStatusOf(corruptErr)).toBe("missing-login");
     });
 });
 
@@ -561,6 +571,31 @@ describe("fetchAntigravityUsageWith and fetchAntigravityStatusWith (fake fetch o
         expect(antigravityStatusOf(rateErr)).toBe("rate-limited");
         expect(safeAntigravityError(rateErr)).toBe("Rate limited · retry later");
         expect(getAntigravityBackoff().remainingMs).toBe(300_000);
+
+        resetAntigravityBackoff();
+        setSystemTime(REAL_NOW);
+        const discoveryRateErr = await caughtRejection(
+            fetchAntigravityUsageWith(
+                TOKEN,
+                SIGNAL,
+                queuedFetch(
+                    respond(403, { error: { message: "missing project" } }, jsonHeaders),
+                    respond(
+                        200,
+                        {
+                            cloudaicompanionProject: PROJECT_ID,
+                            paidTier: { id: "g1-pro-tier", name: "Google AI Pro" },
+                        },
+                        jsonHeaders,
+                    ),
+                    respond(429, null, { "Retry-After": "180" }),
+                ),
+                noWait,
+            ),
+        );
+        expect(discoveryRateErr).toBeInstanceOf(AntigravityRateLimitedError);
+        expect(antigravityStatusOf(discoveryRateErr)).toBe("rate-limited");
+        expect(getAntigravityBackoff().remainingMs).toBe(180_000);
     });
 
     test("buildAntigravityHeaders rejects empty, padded or control-char tokens", () => {

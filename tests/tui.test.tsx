@@ -1944,4 +1944,31 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             if (typeof dispose === "function") dispose();
         }
     });
+
+    test("skips duplicate Antigravity status follow-up when load already resolved plan", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        antigravity.usage.mockResolvedValueOnce({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 90 } }],
+            plan: "Pro",
+        });
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(1);
+            expect(antigravity.status).not.toHaveBeenCalled();
+            expect(currentState().providers.antigravity.plan).toBe("Pro");
+
+            antigravity.usage.mockResolvedValueOnce({
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 85 } }],
+            });
+            antigravity.status.mockResolvedValueOnce({ plan: "Ultra" });
+            await vi.advanceTimersByTimeAsync(120_000);
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+            expect(antigravity.status).toHaveBeenCalledTimes(1);
+            expect(currentState().providers.antigravity.plan).toBe("Ultra");
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
 });

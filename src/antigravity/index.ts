@@ -3,18 +3,19 @@
  * POST /v1internal:retrieveUserQuotaSummary (plus the optional
  * /v1internal:loadCodeAssist lookup for plan tier and companion project ID).
  *
- * Credentials are read at runtime from the Antigravity CLI (`agy`) session in
- * the OS keyring (`service: "gemini"`, `account: "antigravity"`, or Windows
- * target `gemini:antigravity`) with a fallback to
- * `$ANTIGRAVITY_CLI_HOME/antigravity-oauth-token` (default
- * `~/.gemini/antigravity-cli/antigravity-oauth-token`). Refresh tokens are
+ * Credentials are read at runtime from `$ANTIGRAVITY_CLI_HOME/antigravity-oauth-token`
+ * when `ANTIGRAVITY_CLI_HOME` is set, otherwise from the Antigravity CLI (`agy`)
+ * session in the OS keyring (`service: "gemini"`, `account: "antigravity"`, or
+ * Windows target `gemini:antigravity`) with a fallback to
+ * `~/.gemini/antigravity-cli/antigravity-oauth-token`. Refresh tokens are
  * never exchanged or written back, and nothing in this module logs or echoes
  * tokens, headers or response bodies.
  */
 
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { rateLimitPlan } from "../codex/index";
 import type { Usage, UsageWindow } from "../usage";
 
 const USAGE_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
@@ -83,6 +84,9 @@ function isRecord(value: unknown): value is JsonRecord {
 /**
  * Convert a provider's remainingFraction (0..1) into a percent-LEFT Usage entry
  * rounded to four decimals to avoid binary float artifacts.
+ *
+ * @param remainingFraction - Remaining quota fraction in the range 0..1.
+ * @returns Usage object with percentLeft clamped to 0..100.
  */
 export function fromRemainingFraction(remainingFraction: number): Usage {
     const clamped = Math.min(1, Math.max(0, remainingFraction));
@@ -214,6 +218,9 @@ function classifyFamily(
  * Consumer accounts often report `currentTier.id = "free-tier"` and
  * `currentTier.name = "Antigravity"` even when a paid Google One AI plan is
  * active in `paidTier`, so `paidTier` always takes precedence over `currentTier`.
+ *
+ * @param payload - Decoded JSON body from loadCodeAssist.
+ * @returns Normalized plan tier and/or companion project ID, or undefined when neither is present.
  */
 export function parseAntigravityStatus(
     payload: unknown,
@@ -260,7 +267,7 @@ function normalizeTierString(raw: string): string | undefined {
         .trim()
         .split(/\s+/)
         .filter(Boolean);
-    if (words.length === 0) {
+    if (!words.length) {
         return undefined;
     }
     // "Antigravity" is the generic product name on currentTier, not a plan tier.
@@ -294,7 +301,12 @@ function normalizeTierString(raw: string): string | undefined {
     return undefined;
 }
 
-/** Validate a Cloud AI Companion project identifier so it is safe to serialize. */
+/**
+ * Validate a Cloud AI Companion project identifier so it is safe to serialize.
+ *
+ * @param value - Candidate project identifier from credentials, settings or loadCodeAssist.
+ * @returns Trimmed project identifier when valid, otherwise undefined.
+ */
 export function readAntigravityProjectId(value: unknown): string | undefined {
     if (typeof value !== "string") {
         return undefined;
@@ -348,6 +360,11 @@ export interface AntigravityCredentials {
 /**
  * Resolve the Antigravity CLI directory: `$ANTIGRAVITY_CLI_HOME` when set,
  * otherwise `<homeDir>/.gemini/antigravity-cli`. Pure - never touches disk.
+ *
+ * @param homeDir - User home directory used when ANTIGRAVITY_CLI_HOME is unset.
+ * @param agyHome - Value of $ANTIGRAVITY_CLI_HOME; blank or non-string values fall back to homeDir.
+ * @returns Absolute path to the Antigravity CLI configuration directory.
+ * @throws AntigravityProviderError (missing-login) when the resolved path contains control characters or is not absolute.
  */
 export function antigravityCliDir(homeDir: string, agyHome: string | undefined): string {
     const base =
@@ -373,6 +390,11 @@ export function antigravityCliDir(homeDir: string, agyHome: string | undefined):
 
 /**
  * Resolve the Antigravity CLI OAuth token file path. Pure - never touches disk.
+ *
+ * @param homeDir - User home directory used when ANTIGRAVITY_CLI_HOME is unset.
+ * @param agyHome - Value of $ANTIGRAVITY_CLI_HOME; blank or non-string values fall back to homeDir.
+ * @returns Absolute path to the antigravity-oauth-token file.
+ * @throws AntigravityProviderError (missing-login) when the resolved directory is invalid.
  */
 export function antigravityAuthPath(homeDir: string, agyHome: string | undefined): string {
     return join(antigravityCliDir(homeDir, agyHome), "antigravity-oauth-token");
@@ -387,10 +409,16 @@ export function antigravityAuthPath(homeDir: string, agyHome: string | undefined
  * @throws AntigravityProviderError (missing-login) when empty, malformed or lacking an access token.
  */
 export function parseAntigravityCredentials(raw: string): AntigravityCredentials {
+    if (!raw || raw.length > MAX_AUTH_BYTES) {
+        throw new AntigravityProviderError(
+            "missing-login",
+            "Antigravity credentials missing or invalid",
+        );
+    }
     // Strip surrounding whitespace and any NUL padding from Windows credential blobs.
     // oxlint-disable-next-line no-control-regex
     const trimmed = raw.replace(/\x00/g, "").trim();
-    if (!trimmed || trimmed.length > MAX_AUTH_BYTES) {
+    if (!trimmed) {
         throw new AntigravityProviderError(
             "missing-login",
             "Antigravity credentials missing or invalid",
@@ -440,7 +468,12 @@ export function parseAntigravityCredentials(raw: string): AntigravityCredentials
 }
 
 function readBoundedFile(path: string): string {
-    const fd = openSync(path, "r");
+    const flags =
+        constants.O_RDONLY |
+        (process.platform === "win32"
+            ? 0
+            : (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    const fd = openSync(path, flags);
     try {
         const stat = fstatSync(fd);
         if (!stat.isFile()) {
@@ -448,6 +481,9 @@ function readBoundedFile(path: string): string {
                 "missing-login",
                 "Antigravity auth file missing or unreadable",
             );
+        }
+        if (stat.size > MAX_AUTH_BYTES) {
+            throw new AntigravityProviderError("missing-login", "Antigravity auth file too large");
         }
         const buffer = Buffer.alloc(MAX_AUTH_BYTES + 1);
         let bytes = 0;
@@ -470,6 +506,9 @@ function readBoundedFile(path: string): string {
 /**
  * Read optional GCP project ID from `<cliDir>/settings.json` (`gcp.project`).
  * Any missing or malformed file quietly returns undefined.
+ *
+ * @param cliDir - Directory containing the Antigravity CLI settings.json file.
+ * @returns Validated GCP project ID when configured, otherwise undefined.
  */
 export function readAntigravitySettingsProject(cliDir: string): string | undefined {
     try {
@@ -486,6 +525,11 @@ export function readAntigravitySettingsProject(cliDir: string): string | undefin
 
 /**
  * Read and validate an `antigravity-oauth-token` file at an explicit path.
+ *
+ * @param path - Filesystem path of the antigravity-oauth-token file to read.
+ * @param settingsDir - Optional CLI directory from which to read a fallback gcp.project in settings.json.
+ * @returns Validated access token and optional project ID.
+ * @throws AntigravityProviderError (missing-login) when the file is absent, unreadable, oversized, invalid JSON or missing an access token.
  */
 export function readAntigravityAuthFile(
     path: string,
@@ -533,6 +577,12 @@ async function defaultKeyringLoader(): Promise<KeyringReader | undefined> {
  *
  * When `ANTIGRAVITY_CLI_HOME` is explicitly set, reads from that directory's
  * token file directly.
+ *
+ * @param homeDir - User home directory used when ANTIGRAVITY_CLI_HOME is unset.
+ * @param agyHome - Value of $ANTIGRAVITY_CLI_HOME; when set, selects its token file directly.
+ * @param loadKeyring - Injectable OS keyring loader; tests pass a fake to avoid touching the system vault.
+ * @returns Validated access token and optional companion project ID.
+ * @throws AntigravityProviderError (missing-login) when credentials are missing or invalid.
  */
 export async function readAntigravityAuth(
     homeDir: string = homedir(),
@@ -546,30 +596,33 @@ export async function readAntigravityAuth(
         return readAntigravityAuthFile(tokenPath, cliDir);
     }
 
+    let blob: string | null = null;
     try {
         const keyring = await loadKeyring();
         if (keyring) {
-            let blob = await keyring.getPassword(KEYRING_SERVICE, KEYRING_ACCOUNT);
+            blob = await keyring.getPassword(KEYRING_SERVICE, KEYRING_ACCOUNT);
             if (
-                blob === null &&
+                !blob?.trim() &&
                 process.platform === "win32" &&
                 typeof keyring.findPassword === "function"
             ) {
                 blob = await keyring.findPassword(WINDOWS_KEYRING_TARGET);
             }
-            if (typeof blob === "string" && blob.trim()) {
-                const credentials = parseAntigravityCredentials(blob);
-                if (!credentials.projectId) {
-                    const projectId = readAntigravitySettingsProject(cliDir);
-                    if (projectId) {
-                        return { ...credentials, projectId };
-                    }
-                }
-                return credentials;
-            }
         }
     } catch {
         // Keyring unavailable, locked or unreadable: fall through to CLI token file.
+        blob = null;
+    }
+
+    if (typeof blob === "string" && blob.trim()) {
+        const credentials = parseAntigravityCredentials(blob);
+        if (!credentials.projectId) {
+            const projectId = readAntigravitySettingsProject(cliDir);
+            if (projectId) {
+                return { ...credentials, projectId };
+            }
+        }
+        return credentials;
     }
 
     return readAntigravityAuthFile(tokenPath, cliDir);
@@ -582,6 +635,10 @@ export async function readAntigravityAuth(
 /**
  * Build the Cloud Code API request headers from a validated access token.
  * Rejects empty, padded, whitespace-bearing or non-visible-ASCII tokens.
+ *
+ * @param accessToken - Raw OAuth access token.
+ * @returns Header record for Cloud Code API requests.
+ * @throws AntigravityProviderError (missing-login) when the token is empty, padded or contains bytes outside visible ASCII.
  */
 export function buildAntigravityHeaders(accessToken: string): Record<string, string> {
     if (!accessToken.trim()) {
@@ -690,50 +747,12 @@ export class AntigravityRateLimitedError extends AntigravityProviderError {
 /**
  * Classify any thrown value into a safe display category; never throws and
  * never inspects payloads.
+ *
+ * @param error - Any thrown value.
+ * @returns The error's own category for AntigravityProviderError, otherwise "unavailable".
  */
 export function antigravityStatusOf(error: unknown): AntigravityStatus {
     return error instanceof AntigravityProviderError ? error.status : "unavailable";
-}
-
-function retryAfterDelay(
-    value: string | null | undefined,
-    nowMs: number = Date.now(),
-): number | undefined {
-    if (typeof value !== "string") {
-        return undefined;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-        return undefined;
-    }
-    if (/^[0-9]+$/.test(trimmed)) {
-        const seconds = Number(trimmed);
-        return Number.isSafeInteger(seconds) ? seconds : undefined;
-    }
-    if (!/^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(trimmed)) {
-        return undefined;
-    }
-    const time = Date.parse(trimmed);
-    if (!Number.isFinite(time)) {
-        return undefined;
-    }
-    return (time - nowMs) / 1000;
-}
-
-function rateLimitPlan(
-    retryAfter: string | null,
-    maxRetryS: number = MAX_RETRY_WAIT_S,
-    nowMs: number = Date.now(),
-): { retry: boolean; retryAfterMs: number | undefined } {
-    const delayS = retryAfterDelay(retryAfter, nowMs);
-    if (delayS === undefined || delayS <= 0 || delayS > maxRetryS) {
-        return {
-            retry: false,
-            retryAfterMs:
-                delayS !== undefined && delayS > 0 ? Math.round(delayS * 1000) : undefined,
-        };
-    }
-    return { retry: true, retryAfterMs: Math.round(delayS * 1000) };
 }
 
 function abortError(): Error {
@@ -760,13 +779,17 @@ async function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Persisted 429 backoff (module-level)                               */
+/* Persisted 429 backoff and session-paired project cache              */
 /* ------------------------------------------------------------------ */
 
 let nextAllowedAt = 0;
+let cachedProject: { accessToken: string; projectId: string } | undefined;
+let lastLoadedAccessToken: string | undefined;
 
 /**
  * Current persisted 429 backoff (epoch-ms gate + ms remaining).
+ *
+ * @returns The epoch-ms time the next request is allowed plus the milliseconds still to wait (0 when clear).
  */
 export function getAntigravityBackoff(): {
     nextAllowedAt: number;
@@ -779,9 +802,11 @@ export function getAntigravityBackoff(): {
     };
 }
 
-/** Clear the persisted backoff. Exported for test isolation. */
+/** Clear the persisted backoff and cached project state. Exported for test isolation. */
 export function resetAntigravityBackoff(): void {
     nextAllowedAt = 0;
+    cachedProject = undefined;
+    lastLoadedAccessToken = undefined;
 }
 
 function recordRateLimited(delayMs: number | undefined, nowMs: number): void {
@@ -809,6 +834,14 @@ function hasSubscriptionRequired(payload: unknown): boolean {
  * When `projectId` is absent and the endpoint answers 400/403 (some accounts
  * require `{"project": "<cloudaicompanionProject>"}`), a single `loadCodeAssist`
  * discovery call is attempted to resolve the companion project ID and retry.
+ *
+ * @param accessToken - OAuth access token for the request.
+ * @param signal - Abort signal ending the call and any in-flight wait.
+ * @param fetchImpl - Injectable fetch; tests pass a fake to avoid the network.
+ * @param wait - Injectable sleeper; tests pass a no-op to skip real backoff delays.
+ * @param projectId - Optional Cloud AI Companion project ID.
+ * @returns Parsed usage windows plus optional discovered plan tier and project ID.
+ * @throws AbortError when the signal aborts; AntigravityRateLimitedError while rate limited; AntigravityProviderError on auth, entitlement, HTTP or payload failures.
  */
 export async function fetchAntigravityUsageWith(
     accessToken: string,
@@ -836,41 +869,53 @@ export async function fetchAntigravityUsageWith(
             signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
         });
 
-    let response: Awaited<ReturnType<FetchImpl>>;
-    try {
-        response = await request(validProject);
-    } catch {
-        if (signal.aborted) {
-            throw abortError();
+    const sendWithRateLimit = async (
+        project: string | undefined,
+    ): Promise<Awaited<ReturnType<FetchImpl>>> => {
+        let current: Awaited<ReturnType<FetchImpl>>;
+        try {
+            current = await request(project);
+        } catch {
+            if (signal.aborted) {
+                throw abortError();
+            }
+            throw new AntigravityProviderError(
+                "unavailable",
+                "Antigravity usage endpoint unavailable",
+            );
         }
-        throw new AntigravityProviderError("unavailable", "Antigravity usage endpoint unavailable");
-    }
-
-    if (response.status === 429) {
-        const plan = rateLimitPlan(response.headers.get("retry-after"));
-        recordRateLimited(plan.retryAfterMs, Date.now());
-        if (plan.retry && plan.retryAfterMs !== undefined) {
-            await wait(plan.retryAfterMs, signal);
-            try {
-                response = await request(validProject);
-            } catch {
-                if (signal.aborted) {
-                    throw abortError();
+        if (current.status === 429) {
+            const plan = rateLimitPlan(current.headers.get("retry-after"), MAX_RETRY_WAIT_S);
+            recordRateLimited(plan.retryAfterMs, Date.now());
+            if (plan.retry && plan.retryAfterMs !== undefined) {
+                await wait(plan.retryAfterMs, signal);
+                try {
+                    current = await request(project);
+                } catch {
+                    if (signal.aborted) {
+                        throw abortError();
+                    }
+                    throw new AntigravityProviderError(
+                        "unavailable",
+                        "Antigravity usage endpoint unavailable",
+                    );
                 }
-                throw new AntigravityProviderError(
-                    "unavailable",
-                    "Antigravity usage endpoint unavailable",
-                );
+                if (current.status === 429) {
+                    const retryPlan = rateLimitPlan(
+                        current.headers.get("retry-after"),
+                        MAX_RETRY_WAIT_S,
+                    );
+                    recordRateLimited(retryPlan.retryAfterMs, Date.now());
+                    throw new AntigravityRateLimitedError(retryPlan.retryAfterMs);
+                }
+            } else {
+                throw new AntigravityRateLimitedError(plan.retryAfterMs);
             }
-            if (response.status === 429) {
-                const retryPlan = rateLimitPlan(response.headers.get("retry-after"));
-                recordRateLimited(retryPlan.retryAfterMs, Date.now());
-                throw new AntigravityRateLimitedError(retryPlan.retryAfterMs);
-            }
-        } else {
-            throw new AntigravityRateLimitedError(plan.retryAfterMs);
         }
-    }
+        return current;
+    };
+
+    let response = await sendWithRateLimit(validProject);
 
     let discoveredPlan: string | undefined;
     let discoveredProject: string | undefined = validProject;
@@ -884,17 +929,7 @@ export async function fetchAntigravityUsageWith(
         }
         if (assist?.projectId) {
             discoveredProject = assist.projectId;
-            try {
-                response = await request(assist.projectId);
-            } catch {
-                if (signal.aborted) {
-                    throw abortError();
-                }
-                throw new AntigravityProviderError(
-                    "unavailable",
-                    "Antigravity usage endpoint unavailable",
-                );
-            }
+            response = await sendWithRateLimit(assist.projectId);
         }
     }
 
@@ -950,7 +985,7 @@ export async function fetchAntigravityUsageWith(
         );
     }
     const windows = parseAntigravityUsage(payload);
-    if (windows.length === 0) {
+    if (!windows.length) {
         throw new AntigravityProviderError(
             "unavailable",
             "Antigravity usage data missing or unsupported",
@@ -967,17 +1002,49 @@ export async function fetchAntigravityUsageWith(
 /**
  * Runtime entry point: reads credentials from the Antigravity CLI keyring or
  * token file at call time, then fetches and parses usage.
+ *
+ * @param signal - Abort signal for the request.
+ * @returns Parsed usage windows plus optional discovered plan tier and project ID.
+ * @throws AntigravityProviderError on credential, auth, HTTP or payload failures; AbortError when the signal aborts.
  */
 export async function fetchAntigravityUsage(
     signal: AbortSignal,
 ): Promise<{ windows: UsageWindow[]; plan?: string; projectId?: string }> {
+    lastLoadedAccessToken = undefined;
     const { accessToken, projectId } = await readAntigravityAuth();
-    return fetchAntigravityUsageWith(accessToken, signal, fetch, sleep, projectId);
+    const effectiveProject =
+        projectId ??
+        (cachedProject?.accessToken === accessToken ? cachedProject.projectId : undefined);
+    try {
+        const result = await fetchAntigravityUsageWith(
+            accessToken,
+            signal,
+            fetch,
+            sleep,
+            effectiveProject,
+        );
+        lastLoadedAccessToken = accessToken;
+        if (result.projectId) {
+            cachedProject = { accessToken, projectId: result.projectId };
+        }
+        return result;
+    } catch (error) {
+        if (!projectId && cachedProject?.accessToken === accessToken) {
+            cachedProject = undefined;
+        }
+        throw error;
+    }
 }
 
 /**
  * Optional subscription tier and companion project lookup via `loadCodeAssist`;
  * failures never block usage.
+ *
+ * @param accessToken - OAuth access token for the request.
+ * @param signal - Abort signal ending the call.
+ * @param fetchImpl - Injectable fetch; tests pass a fake to avoid the network.
+ * @returns Normalized plan tier and/or companion project ID, or undefined when unavailable or malformed.
+ * @throws AbortError when the signal aborts; every other failure resolves to undefined.
  */
 export async function fetchAntigravityStatusWith(
     accessToken: string,
@@ -1019,6 +1086,12 @@ export async function fetchAntigravityStatusWith(
 
 /**
  * Runtime entry point for optional subscription tier lookup via `loadCodeAssist`.
+ * Reuses the access token from the preceding usage load when available so the
+ * keyring/file is not read twice in a single refresh cycle.
+ *
+ * @param signal - Abort signal for the request.
+ * @returns Normalized plan tier when available, otherwise undefined.
+ * @throws AbortError when the signal aborts; credential and endpoint failures resolve to undefined.
  */
 export async function fetchAntigravityStatus(
     signal: AbortSignal,
@@ -1026,9 +1099,14 @@ export async function fetchAntigravityStatus(
     if (signal.aborted) {
         throw abortError();
     }
+    const pairedToken = lastLoadedAccessToken;
+    lastLoadedAccessToken = undefined;
     try {
-        const { accessToken } = await readAntigravityAuth();
+        const accessToken = pairedToken ?? (await readAntigravityAuth()).accessToken;
         const status = await fetchAntigravityStatusWith(accessToken, signal);
+        if (status?.projectId) {
+            cachedProject = { accessToken, projectId: status.projectId };
+        }
         return status?.plan ? { plan: status.plan } : undefined;
     } catch {
         if (signal.aborted) {
