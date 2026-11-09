@@ -13,7 +13,8 @@
         "sidebar",
         "codex",
         "opencode-go",
-        "opencode-go-plus"
+        "opencode-go-plus",
+        "antigravity"
     ],
     "homepage": "https://github.com/jn-s3s/opencode-tui-quota-usage#readme",
     "bugs": {
