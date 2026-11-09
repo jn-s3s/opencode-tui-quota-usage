@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
+### Added
+
+- Antigravity quota section showing Gemini, Claude/GPT, and Argon usage windows as percent-left meters with reset countdowns, disabled by default until enabled with `/quota-antigravity`.
+- Token discovery and automatic account switching for Antigravity, resolving active accounts from OpenCode configuration or falling back to the Antigravity CLI keyring session and token cache.
+- Per-account rate limit backoff and cooldown tracking for Antigravity requests returning HTTP 429.
+
+### Changed
+
+- The sidebar no longer renders a list of other disabled providers when at least one provider is active. If all providers are off, the sidebar displays a single "No providers enabled" message to prevent text overflow on narrow terminals.
+- Switching accounts now clears cached Antigravity usage state immediately and deduplicates credential updates during polling.
+
+### Security
+
+- Updated `@opencode/plugin` to 2.2.5, `@opentui/core` and `@opentui/solid` to 0.8.2, `solid-js` to 1.9.18, and updated transitive dependencies to resolve security advisories.
+
 ## [0.2.1] - 2026-10-04
 
 ### Fixed
@@ -33,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI commands `/quota-usage` for sidebar visibility, `/quota-providers` for setup guidance and `/quota-opencode-key` for Go credential and org ID management.
 - Independently collapsible provider sections, a refresh for enabled providers every 2 minutes, a 30 second countdown clock and warning or critical thresholds at 45% and 10% left.
 
-[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jn-s3s/opencode-tui-quota-usage/releases/tag/v0.1.0
