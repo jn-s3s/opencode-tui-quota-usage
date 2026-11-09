@@ -3,6 +3,12 @@
 /* ------------------------------------------------------------------ */
 
 import {
+    antigravityStatusOf,
+    fetchAntigravityStatus,
+    fetchAntigravityUsage,
+    getAntigravityBackoff,
+} from "./antigravity/index";
+import {
     codexStatusOf,
     fetchCodexActiveUntil,
     fetchCodexUsage,
@@ -101,6 +107,28 @@ export function safeCodexError(error: unknown): string {
     }
 }
 
+/**
+ * Map an Antigravity failure to a short, fixed sidebar message containing no
+ * secrets or raw error data.
+ *
+ * @param error - Unknown value thrown by an Antigravity fetch.
+ * @returns A displayable status string such as "Sign in with Antigravity CLI" or "Unavailable".
+ */
+export function safeAntigravityError(error: unknown): string {
+    switch (antigravityStatusOf(error)) {
+        case "missing-login":
+            return "Sign in with Antigravity CLI";
+        case "auth":
+            return "Antigravity sign-in expired";
+        case "no-subscription":
+            return "No Antigravity quota entitlement";
+        case "rate-limited":
+            return "Rate limited · retry later";
+        default:
+            return "Unavailable";
+    }
+}
+
 /** OpenCode Go: rolling, weekly and monthly windows from a source-visible, undocumented API. */
 export function createGoProvider(getCredentials: () => GoCredentials | undefined): Provider {
     let successfulSource: GoCredentials | undefined;
@@ -173,8 +201,46 @@ const codexProvider: Provider = {
     },
 };
 
+/**
+ * Antigravity: grouped model quota windows (Gemini, Claude/GPT, and separate
+ * Pro-plan Argon weekly when reported) plus optional subscription tier lookup.
+ */
+let antigravityNeedsFollowUp = false;
+const antigravityProvider: Provider = {
+    id: "antigravity",
+    label: "Antigravity",
+    load: async (signal): Promise<ProviderResult> => {
+        antigravityNeedsFollowUp = false;
+        const result = await fetchAntigravityUsage(signal);
+        antigravityNeedsFollowUp = result.plan === undefined;
+        return {
+            windows: result.windows,
+            ...(result.plan ? { plan: result.plan } : {}),
+        };
+    },
+    errorText: safeAntigravityError,
+    cooldown: (error) => {
+        const backoff = getAntigravityBackoff();
+        if (antigravityStatusOf(error) !== "rate-limited" || backoff.remainingMs <= 0) {
+            return undefined;
+        }
+        return { until: backoff.nextAllowedAt };
+    },
+    followUp: (signal) => {
+        if (!antigravityNeedsFollowUp) {
+            return Promise.resolve(undefined);
+        }
+        antigravityNeedsFollowUp = false;
+        return fetchAntigravityStatus(signal);
+    },
+};
+
 /** Every tracked usage type, in sidebar display order. */
-export const PROVIDERS: readonly Provider[] = [createGoProvider(() => undefined), codexProvider];
+export const PROVIDERS: readonly Provider[] = [
+    createGoProvider(() => undefined),
+    codexProvider,
+    antigravityProvider,
+];
 
 /**
  * Resolve the status note for a section at render time.

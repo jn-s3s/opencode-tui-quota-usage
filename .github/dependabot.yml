@@ -2,6 +2,7 @@ version: 2
 updates:
     - package-ecosystem: "npm"
       directory: "/"
+      target-branch: "dev"
       schedule:
           interval: "weekly"
       open-pull-requests-limit: 10
@@ -10,8 +11,28 @@ updates:
           - "javascript"
       commit-message:
           prefix: "deps"
+      groups:
+          opentui:
+              patterns:
+                  - "@opentui/*"
+                  - "solid-js"
+          dev-tooling:
+              dependency-type: "development"
+              exclude-patterns:
+                  - "@opentui/*"
+                  - "solid-js"
+      ignore:
+          - dependency-name: "@types/node"
+            update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+          - dependency-name: "oxlint"
+            update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+          - dependency-name: "prettier"
+            update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+          - dependency-name: "vitest"
+            update-types: ["version-update:semver-minor", "version-update:semver-patch"]
     - package-ecosystem: "github-actions"
       directory: "/"
+      target-branch: "dev"
       schedule:
           interval: "weekly"
       open-pull-requests-limit: 5
@@ -20,3 +41,6 @@ updates:
           - "github-actions"
       commit-message:
           prefix: "ci"
+      ignore:
+          - dependency-name: "actions/setup-node"
+            update-types: ["version-update:semver-major"]

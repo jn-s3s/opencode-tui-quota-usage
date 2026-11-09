@@ -7,7 +7,7 @@ body:
       attributes:
           value: |
               Thanks for taking the time to fill this out. The more detail you give, the faster we can help.
-              Do not paste tokens, `auth.json` contents or full API response bodies.
+              Do not paste tokens, auth files (such as `auth.json` or `antigravity-accounts.json`), or full API response bodies.
 
     - type: textarea
       id: description
