@@ -871,6 +871,37 @@ describe("OpenCode antigravity-accounts.json parsing, token exchange, caching an
         expect(safeAntigravityError(invalidGrantErr)).toBe("Antigravity sign-in expired");
         expect(invalidGrantErr.message).not.toContain(secretRefresh);
 
+        // 400/401 invalid_client means the OAuth client itself was rejected, not the user's sign-in
+        for (const status of [400, 401]) {
+            const invalidClientErr = await caughtRejection(
+                exchangeAntigravityRefreshToken(
+                    secretRefresh,
+                    SIGNAL,
+                    queuedFetch(
+                        respond(
+                            status,
+                            { error: "invalid_client", error_description: `bad ${secretRefresh}` },
+                            jsonHeaders,
+                        ),
+                    ),
+                ),
+            );
+            expect(antigravityStatusOf(invalidClientErr)).toBe("unavailable");
+            expect(safeAntigravityError(invalidClientErr)).toBe("Unavailable");
+            expect(invalidClientErr.message).toContain("OPENCODE_ANTIGRAVITY_CLIENT_ID");
+            expect(invalidClientErr.message).not.toContain(secretRefresh);
+        }
+
+        // A 400 with a non-JSON or unreadable body still reads as a rejected sign-in
+        const opaqueErr = await caughtRejection(
+            exchangeAntigravityRefreshToken(
+                secretRefresh,
+                SIGNAL,
+                queuedFetch(respond(400, "<html>bad</html>", { "content-type": "text/html" })),
+            ),
+        );
+        expect(antigravityStatusOf(opaqueErr)).toBe("auth");
+
         // 429 or 500 from token endpoint surfaces unavailable
         for (const status of [429, 500, 503]) {
             const unavailErr = await caughtRejection(
@@ -1050,6 +1081,87 @@ describe("fetchAntigravityUsageWith and fetchAntigravityStatusWith (fake fetch o
         expect(discoveryRateErr).toBeInstanceOf(AntigravityRateLimitedError);
         expect(antigravityStatusOf(discoveryRateErr)).toBe("rate-limited");
         expect(getAntigravityBackoff().remainingMs).toBe(180_000);
+    });
+
+    test("scopes the 429 backoff to the account that was rate limited", async () => {
+        setSystemTime(REAL_NOW);
+        const rateErr = await caughtRejection(
+            fetchAntigravityUsageWith(
+                TOKEN,
+                SIGNAL,
+                queuedFetch(respond(429, null, { "Retry-After": "600" })),
+                noWait,
+                PROJECT_ID,
+                "account-a",
+            ),
+        );
+        expect(rateErr).toBeInstanceOf(AntigravityRateLimitedError);
+        expect(getAntigravityBackoff().remainingMs).toBe(600_000);
+
+        // A different account is not blocked by account A's cooldown.
+        const other = await fetchAntigravityUsageWith(
+            TOKEN,
+            SIGNAL,
+            queuedFetch(respond(200, PRO_PAYLOAD, jsonHeaders)),
+            noWait,
+            PROJECT_ID,
+            "account-b",
+        );
+        expect(other.windows.length).toBeGreaterThan(0);
+
+        // Account B's success must not clear account A's cooldown.
+        expect(getAntigravityBackoff().remainingMs).toBe(600_000);
+        let calls = 0;
+        const blocked = await caughtRejection(
+            fetchAntigravityUsageWith(
+                TOKEN,
+                SIGNAL,
+                async () => {
+                    calls += 1;
+                    return respond(200, PRO_PAYLOAD, jsonHeaders);
+                },
+                noWait,
+                PROJECT_ID,
+                "account-a",
+            ),
+        );
+        expect(blocked).toBeInstanceOf(AntigravityRateLimitedError);
+        expect(calls).toBe(0);
+
+        // The cooldown ends for account A once its own request succeeds after expiry.
+        setSystemTime(REAL_NOW + 601_000);
+        await fetchAntigravityUsageWith(
+            TOKEN,
+            SIGNAL,
+            queuedFetch(respond(200, PRO_PAYLOAD, jsonHeaders)),
+            noWait,
+            PROJECT_ID,
+            "account-a",
+        );
+        expect(getAntigravityBackoff().remainingMs).toBe(0);
+    });
+
+    test("keeps the shared backoff when the account is unknown", async () => {
+        setSystemTime(REAL_NOW);
+        await caughtRejection(
+            fetchAntigravityUsageWith(
+                TOKEN,
+                SIGNAL,
+                queuedFetch(respond(429, null, { "Retry-After": "300" })),
+                noWait,
+                PROJECT_ID,
+            ),
+        );
+        const blocked = await caughtRejection(
+            fetchAntigravityUsageWith(
+                TOKEN,
+                SIGNAL,
+                queuedFetch(respond(200, PRO_PAYLOAD, jsonHeaders)),
+                noWait,
+                PROJECT_ID,
+            ),
+        );
+        expect(blocked).toBeInstanceOf(AntigravityRateLimitedError);
     });
 
     test("buildAntigravityHeaders rejects empty, padded or control-char tokens", () => {

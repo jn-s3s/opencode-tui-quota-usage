@@ -27,8 +27,10 @@ const USAGE_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieve
 const LOAD_CODE_ASSIST_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 /**
- * Antigravity CLI User-Agent required so the backend includes the Gemini Models
- * and Gemini 4 Argon quota groups alongside the third-party model group.
+ * User-Agent that mimics the Antigravity CLI. The backend only includes the
+ * Gemini Models and Gemini 4 Argon quota groups alongside the third-party model
+ * group for this client family, so treat it as configuration that may need a
+ * bump if the backend stops returning those groups.
  */
 const USER_AGENT = "antigravity/cli/1.4.7";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -50,14 +52,23 @@ const DEFAULT_429_COOLDOWN_MS = 60_000;
 const MAX_BACKOFF_PERSIST_MS = 60 * 60_000;
 
 /**
- * Public installed-app OAuth client metadata for Antigravity, assembled at
- * runtime so static secret scanners do not misclassify public client identifiers.
+ * Google's public installed-app OAuth client for Antigravity, the same client
+ * the Antigravity CLI and OpenCode's Antigravity auth plugin use. Google does
+ * not treat installed-app client secrets as confidential: they identify the
+ * application, not the user, and cannot access any account without a user's
+ * refresh token. Set OPENCODE_ANTIGRAVITY_CLIENT_ID and
+ * OPENCODE_ANTIGRAVITY_CLIENT_SECRET to override both if Google rotates them.
  */
 const DEFAULT_CLIENT_ID_PARTS = [
     "1071006060591",
     "tmhssin2h21lcre235vtolojh4g403ep",
     "apps.googleusercontent.com",
 ] as const;
+/**
+ * Char codes, not a literal, so GitHub push protection does not block the
+ * package. This is not a security measure: the value is public and decodes
+ * trivially.
+ */
 const DEFAULT_CLIENT_SECRET_CODES = [
     71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74, 49, 109, 76,
     66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
@@ -1004,6 +1015,28 @@ async function defaultKeyringLoader(): Promise<KeyringReader | undefined> {
 }
 
 /**
+ * Read only the short OAuth `error` code from a token endpoint rejection.
+ * The body is bounded and never echoed; anything unreadable yields undefined.
+ *
+ * @param response - Token endpoint response with a 400/401 status.
+ * @returns The lowercase `error` code when it is a short OAuth token, otherwise undefined.
+ */
+async function readOAuthErrorCode(
+    response: Awaited<ReturnType<FetchImpl>>,
+): Promise<string | undefined> {
+    if (!isJsonContentType(response.headers.get("content-type") ?? "")) {
+        return undefined;
+    }
+    try {
+        const payload = await boundedJson(response);
+        const code = isRecord(payload) && typeof payload.error === "string" ? payload.error : "";
+        return /^[a-z_]{1,64}$/.test(code) ? code : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Exchange an OAuth `refresh_token` for a short-lived `access_token` in memory
  * via `POST https://oauth2.googleapis.com/token`. Never writes to disk and
  * never includes secrets or upstream bodies in thrown errors.
@@ -1012,7 +1045,7 @@ async function defaultKeyringLoader(): Promise<KeyringReader | undefined> {
  * @param signal - Abort signal for the token request.
  * @param fetchImpl - Injectable fetch implementation.
  * @returns Fresh access token and lifetime in seconds.
- * @throws AbortError when aborted; AntigravityProviderError("auth") on 400/401/403/3xx; AntigravityProviderError("unavailable") on 429/5xx/network/payload errors.
+ * @throws AbortError when aborted; AntigravityProviderError("auth") on 400/401/403/3xx; AntigravityProviderError("unavailable") on `invalid_client`, 429/5xx/network/payload errors.
  */
 export async function exchangeAntigravityRefreshToken(
     refreshToken: string,
@@ -1063,7 +1096,16 @@ export async function exchangeAntigravityRefreshToken(
         Number.isInteger(response.status) && response.status >= 100 && response.status <= 599
             ? response.status
             : 0;
-    if (status === 400 || status === 401 || status === 403 || (status >= 300 && status < 400)) {
+    if (status === 400 || status === 401) {
+        if ((await readOAuthErrorCode(response)) === "invalid_client") {
+            throw new AntigravityProviderError(
+                "unavailable",
+                "Antigravity OAuth client rejected; set OPENCODE_ANTIGRAVITY_CLIENT_ID and OPENCODE_ANTIGRAVITY_CLIENT_SECRET",
+            );
+        }
+        throw new AntigravityProviderError("auth", "Antigravity refresh token rejected");
+    }
+    if (status === 403 || (status >= 300 && status < 400)) {
         throw new AntigravityProviderError("auth", "Antigravity refresh token rejected");
     }
     if (!response.ok || status !== 200) {
@@ -1465,12 +1507,13 @@ async function sleep(ms: number, signal: AbortSignal): Promise<void> {
 /* Persisted 429 backoff and session-paired project cache              */
 /* ------------------------------------------------------------------ */
 
-let nextAllowedAt = 0;
+let rateLimit: { accountKey: string | undefined; until: number } | undefined;
 let cachedProject: { accessToken: string; accountKey?: string; projectId: string } | undefined;
 let lastLoadedSession: { accessToken: string; accountKey?: string } | undefined;
 
 /**
- * Current persisted 429 backoff (epoch-ms gate + ms remaining).
+ * Current persisted 429 backoff (epoch-ms gate + ms remaining) for the account
+ * that last hit the limit.
  *
  * @returns The epoch-ms time the next request is allowed plus the milliseconds still to wait (0 when clear).
  */
@@ -1479,9 +1522,10 @@ export function getAntigravityBackoff(): {
     remainingMs: number;
 } {
     const now = Date.now();
+    const until = rateLimit?.until ?? 0;
     return {
-        nextAllowedAt,
-        remainingMs: nextAllowedAt > now ? nextAllowedAt - now : 0,
+        nextAllowedAt: until,
+        remainingMs: until > now ? until - now : 0,
     };
 }
 
@@ -1492,19 +1536,33 @@ export function resetAntigravityTokenCache(): void {
 
 /** Clear the persisted backoff, token cache and cached project state. Exported for test isolation. */
 export function resetAntigravityBackoff(): void {
-    nextAllowedAt = 0;
+    rateLimit = undefined;
     cachedProject = undefined;
     lastLoadedSession = undefined;
     cachedSession = undefined;
     activeAccountHint = undefined;
 }
 
-function recordRateLimited(delayMs: number | undefined, nowMs: number): void {
-    nextAllowedAt =
-        nowMs +
-        (delayMs !== undefined && delayMs > 0
-            ? Math.min(delayMs, MAX_BACKOFF_PERSIST_MS)
-            : DEFAULT_429_COOLDOWN_MS);
+function recordRateLimited(
+    delayMs: number | undefined,
+    nowMs: number,
+    accountKey: string | undefined,
+): void {
+    rateLimit = {
+        accountKey,
+        until:
+            nowMs +
+            (delayMs !== undefined && delayMs > 0
+                ? Math.min(delayMs, MAX_BACKOFF_PERSIST_MS)
+                : DEFAULT_429_COOLDOWN_MS),
+    };
+}
+
+/** Epoch-ms end of an active backoff for this account, or 0 when none applies. */
+function activeBackoffUntil(accountKey: string | undefined, nowMs: number): number {
+    return rateLimit !== undefined && rateLimit.accountKey === accountKey && rateLimit.until > nowMs
+        ? rateLimit.until
+        : 0;
 }
 
 function hasSubscriptionRequired(payload: unknown): boolean {
@@ -1530,6 +1588,7 @@ function hasSubscriptionRequired(payload: unknown): boolean {
  * @param fetchImpl - Injectable fetch; tests pass a fake to avoid the network.
  * @param wait - Injectable sleeper; tests pass a no-op to skip real backoff delays.
  * @param projectId - Optional Cloud AI Companion project ID.
+ * @param accountKey - Optional non-secret account key scoping the 429 backoff; omit when the account is unknown.
  * @returns Parsed usage windows plus optional discovered plan tier and project ID.
  * @throws AbortError when the signal aborts; AntigravityRateLimitedError while rate limited; AntigravityProviderError on auth, entitlement, HTTP or payload failures.
  */
@@ -1539,6 +1598,7 @@ export async function fetchAntigravityUsageWith(
     fetchImpl: FetchImpl = fetch,
     wait: (ms: number, signal: AbortSignal) => Promise<void> = sleep,
     projectId?: string,
+    accountKey?: string,
 ): Promise<{ windows: UsageWindow[]; plan?: string; projectId?: string }> {
     if (signal.aborted) {
         throw abortError();
@@ -1546,8 +1606,9 @@ export async function fetchAntigravityUsageWith(
     const headers = buildAntigravityHeaders(accessToken);
     const validProject = readAntigravityProjectId(projectId);
     const now = Date.now();
-    if (now < nextAllowedAt) {
-        throw new AntigravityRateLimitedError(nextAllowedAt - now);
+    const blockedUntil = activeBackoffUntil(accountKey, now);
+    if (blockedUntil > 0) {
+        throw new AntigravityRateLimitedError(blockedUntil - now);
     }
 
     const request = (project: string | undefined) =>
@@ -1576,7 +1637,7 @@ export async function fetchAntigravityUsageWith(
         }
         if (current.status === 429) {
             const plan = rateLimitPlan(current.headers.get("retry-after"), MAX_RETRY_WAIT_S);
-            recordRateLimited(plan.retryAfterMs, Date.now());
+            recordRateLimited(plan.retryAfterMs, Date.now(), accountKey);
             if (plan.retry && plan.retryAfterMs !== undefined) {
                 await wait(plan.retryAfterMs, signal);
                 try {
@@ -1595,7 +1656,7 @@ export async function fetchAntigravityUsageWith(
                         current.headers.get("retry-after"),
                         MAX_RETRY_WAIT_S,
                     );
-                    recordRateLimited(retryPlan.retryAfterMs, Date.now());
+                    recordRateLimited(retryPlan.retryAfterMs, Date.now(), accountKey);
                     throw new AntigravityRateLimitedError(retryPlan.retryAfterMs);
                 }
             } else {
@@ -1681,7 +1742,9 @@ export async function fetchAntigravityUsageWith(
             "Antigravity usage data missing or unsupported",
         );
     }
-    nextAllowedAt = 0;
+    if (rateLimit?.accountKey === accountKey) {
+        rateLimit = undefined;
+    }
     return {
         windows,
         ...(discoveredPlan ? { plan: discoveredPlan } : {}),
@@ -1772,6 +1835,7 @@ export async function fetchAntigravityUsage(
             fetchImpl,
             wait,
             effectiveProject,
+            accountKey,
         );
         return recordSuccess(result);
     } catch (error) {
@@ -1800,6 +1864,7 @@ export async function fetchAntigravityUsage(
                     fetchImpl,
                     wait,
                     effectiveProject,
+                    accountKey,
                 );
                 return recordSuccess(retryResult);
             } catch (retryError) {
