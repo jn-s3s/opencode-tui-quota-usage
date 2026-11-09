@@ -2,6 +2,7 @@ version: 2
 updates:
     - package-ecosystem: "npm"
       directory: "/"
+      target-branch: "dev"
       schedule:
           interval: "weekly"
       open-pull-requests-limit: 10
@@ -10,8 +11,19 @@ updates:
           - "javascript"
       commit-message:
           prefix: "deps"
+      groups:
+          opentui:
+              patterns:
+                  - "@opentui/*"
+                  - "solid-js"
+          dev-tooling:
+              dependency-type: "development"
+              exclude-patterns:
+                  - "@opentui/*"
+                  - "solid-js"
     - package-ecosystem: "github-actions"
       directory: "/"
+      target-branch: "dev"
       schedule:
           interval: "weekly"
       open-pull-requests-limit: 5
