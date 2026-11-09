@@ -2,6 +2,11 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createSignal, For, untrack } from "solid-js";
 import packageJson from "../package.json";
+import {
+    readActiveAntigravityAccountKey,
+    setAntigravityAccountHint,
+    type AntigravityAccountHint,
+} from "./antigravity/index";
 import { createGoProvider, PROVIDERS, statusNote } from "./providers";
 import {
     clearWindowsGoCredentials,
@@ -20,8 +25,8 @@ const PERCENT_LEFT_WARNING = 45;
 /** Package name and version shown in the main header row. */
 export const PROJECT_NAME = packageJson.name;
 export const PROJECT_VERSION = packageJson.version;
-type ProviderId = "codex" | "opencode";
-type ProviderEnablement = Record<ProviderId, boolean>;
+type ProviderId = "codex" | "opencode" | "antigravity";
+type ProviderEnablement = Partial<Record<ProviderId, boolean>>;
 const noop = () => {};
 function vaultErrorCode(error: unknown): "unavailable" | "corrupt" | "invalid" | undefined {
     if (!error || typeof error !== "object" || !("code" in error)) return undefined;
@@ -521,7 +526,7 @@ export default Plugin.define({
         const [settings, updateSettings] = context.storage.store("settings", {
             initial: {
                 visible: true,
-                enabled: { codex: false, opencode: false },
+                enabled: { codex: false, opencode: false, antigravity: false },
                 collapsed: [] as string[],
             },
         });
@@ -544,6 +549,98 @@ export default Plugin.define({
         let generation = 0;
         let refreshEpoch = 0;
         let goDialogRequest = 0;
+        let lastGoogleCredentialIdentity: string | undefined;
+        let lastAntigravityFileKey: string | undefined;
+        let lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+
+        const readIntegrationGoogleHint = ():
+            { identity: string; hint: AntigravityAccountHint } | undefined => {
+            try {
+                const loc = context.location ?? context.data?.location?.default?.();
+                const integrations = context.data?.location?.integration?.list?.(loc);
+                const google = integrations?.find((item) => item.id === "google");
+                const activeConn = google?.connections?.find(
+                    (conn) => conn.type === "credential" && conn.method === "oauth",
+                );
+                if (activeConn && activeConn.type === "credential" && activeConn.label?.trim()) {
+                    const email = activeConn.label.trim();
+                    return {
+                        identity: `${activeConn.id ?? ""}:${email}`,
+                        hint: { email },
+                    };
+                }
+            } catch {
+                // ignore
+            }
+            return undefined;
+        };
+
+        const syncActiveGoogleHint = async (): Promise<void> => {
+            if (!context.client?.credential?.list && !context.data?.location?.integration?.list) {
+                return;
+            }
+            try {
+                const credentials = await context.client?.credential?.list?.();
+                if (Array.isArray(credentials)) {
+                    const active = credentials.find(
+                        (entry) => entry.integrationID === "google" && entry.active,
+                    );
+                    if (active) {
+                        const oauth = active.value?.type === "oauth" ? active.value : undefined;
+                        const meta =
+                            oauth?.metadata && typeof oauth.metadata === "object"
+                                ? (oauth.metadata as Record<string, unknown>)
+                                : undefined;
+                        const email =
+                            (typeof meta?.email === "string" && meta.email.trim()) ||
+                            (typeof active.label === "string" && active.label.trim()) ||
+                            undefined;
+                        const accountId =
+                            typeof meta?.antigravityAccountId === "string" &&
+                            meta.antigravityAccountId.trim()
+                                ? meta.antigravityAccountId.trim()
+                                : undefined;
+                        const refreshToken =
+                            typeof oauth?.refresh === "string" && oauth.refresh.trim()
+                                ? oauth.refresh.trim()
+                                : undefined;
+                        const identity = `${active.id}:${accountId ?? ""}:${email ?? ""}`;
+                        if (identity !== lastGoogleCredentialIdentity) {
+                            lastGoogleCredentialIdentity = identity;
+                            setAntigravityAccountHint({
+                                ...(refreshToken ? { refreshToken } : {}),
+                                ...(accountId ? { accountId } : {}),
+                                ...(email ? { email } : {}),
+                            });
+                            lastAntigravityFileKey = readActiveAntigravityAccountKey(
+                                undefined,
+                                undefined,
+                                undefined,
+                                undefined,
+                                false,
+                            );
+                            lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+                        }
+                        return;
+                    }
+                }
+            } catch {
+                // fall back to integration list
+            }
+            const fallback = readIntegrationGoogleHint();
+            if (fallback && fallback.identity !== lastGoogleCredentialIdentity) {
+                lastGoogleCredentialIdentity = fallback.identity;
+                setAntigravityAccountHint(fallback.hint);
+                lastAntigravityFileKey = readActiveAntigravityAccountKey(
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    false,
+                );
+                lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+            }
+        };
         invalidateOpenCode = () => {
             generation++;
             controller?.abort();
@@ -661,6 +758,9 @@ export default Plugin.define({
             const intent = ++refreshEpoch;
             try {
                 await readVault();
+                if (isEnabled("antigravity")) {
+                    await syncActiveGoogleHint();
+                }
                 if (disposed || !shown() || intent !== refreshEpoch) return;
                 const refreshGeneration = ++generation;
                 const request = new AbortController();
@@ -729,7 +829,11 @@ export default Plugin.define({
                 if (enableProvider && !isEnabled("opencode")) {
                     try {
                         await updateSettings((draft) => {
-                            draft.enabled ??= { codex: false, opencode: false };
+                            draft.enabled ??= {
+                                codex: false,
+                                opencode: false,
+                                antigravity: false,
+                            };
                             draft.enabled.opencode = true;
                         });
                     } catch {
@@ -947,7 +1051,7 @@ export default Plugin.define({
             }
             try {
                 await updateSettings((draft) => {
-                    draft.enabled ??= { codex: false, opencode: false };
+                    draft.enabled ??= { codex: false, opencode: false, antigravity: false };
                     draft.enabled[id] = next;
                 });
             } catch {
@@ -959,6 +1063,9 @@ export default Plugin.define({
                 return;
             }
             if (next) {
+                if (id === "antigravity") {
+                    lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+                }
                 // Restart the bounded shared generation so a newly opted-in provider starts promptly.
                 restartRequests();
                 context.ui.toast.show({
@@ -1025,8 +1132,60 @@ export default Plugin.define({
             setNow(Date.now());
             void refresh();
             poll = setInterval(() => void refresh(), POLL_MS);
-            clock = setInterval(() => setNow(Date.now()), 30_000);
+            clock = setInterval(() => {
+                setNow(Date.now());
+                if (shown() && isEnabled("antigravity")) {
+                    if (lastGoogleCredentialIdentity !== undefined) {
+                        const rawFileKey = readActiveAntigravityAccountKey(
+                            undefined,
+                            undefined,
+                            undefined,
+                            undefined,
+                            false,
+                        );
+                        if (rawFileKey !== undefined && rawFileKey !== lastAntigravityFileKey) {
+                            lastAntigravityFileKey = rawFileKey;
+                            setAntigravityAccountHint(undefined);
+                        }
+                    }
+                    const nextKey = readActiveAntigravityAccountKey();
+                    if (nextKey !== lastAntigravityAccountKey) {
+                        lastAntigravityAccountKey = nextKey;
+                        setState((previous) => {
+                            const providers = { ...previous.providers };
+                            delete providers.antigravity;
+                            return { providers };
+                        });
+                        restartRequests();
+                    }
+                }
+            }, 30_000);
         };
+
+        const stopCredentialSwitched = context.data?.on?.("credential.switched", (event) => {
+            if (disposed || event.data?.integrationID !== "google") return;
+            lastGoogleCredentialIdentity = undefined;
+            const immediate = readIntegrationGoogleHint();
+            if (immediate) {
+                setAntigravityAccountHint(immediate.hint);
+                lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+            }
+            if (shown() && isEnabled("antigravity")) {
+                setState((previous) => {
+                    const providers = { ...previous.providers };
+                    delete providers.antigravity;
+                    return { providers };
+                });
+                restartRequests();
+            }
+        });
+        const stopCredentialUpdated = context.data?.on?.("credential.updated", () => {
+            if (disposed) return;
+            lastGoogleCredentialIdentity = undefined;
+            if (shown() && isEnabled("antigravity")) {
+                restartRequests();
+            }
+        });
 
         applyVisibility(settings.visible);
         // Untracked: the apply reads shown(), so tracking would make this effect depend on
@@ -1122,6 +1281,7 @@ export default Plugin.define({
                             each={layoutRows(state(), collapsed(), now(), {
                                 codex: isEnabled("codex"),
                                 opencode: isEnabled("opencode"),
+                                antigravity: isEnabled("antigravity"),
                             })}
                         >
                             {(row) => {
@@ -1235,6 +1395,8 @@ export default Plugin.define({
             controller?.abort();
             if (poll !== undefined) clearInterval(poll);
             if (clock !== undefined) clearInterval(clock);
+            stopCredentialSwitched?.();
+            stopCredentialUpdated?.();
             releaseAppSlot?.();
             releaseSlot?.();
         };

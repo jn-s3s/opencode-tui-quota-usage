@@ -27,6 +27,14 @@ const opencode = vi.hoisted(() => ({
     usage: vi.fn(),
     status: vi.fn(),
 }));
+const antigravity = vi.hoisted(() => ({
+    usage: vi.fn(),
+    status: vi.fn(),
+    statusOf: vi.fn(() => "unavailable"),
+    backoff: vi.fn(() => ({ nextAllowedAt: 0, remainingMs: 0 })),
+    accountKey: vi.fn<() => string | undefined>(() => undefined),
+    setHint: vi.fn(),
+}));
 const vault = vi.hoisted(() => ({
     load: vi.fn(async () => undefined),
     save: vi.fn(async (_value: unknown) => {}),
@@ -57,6 +65,15 @@ vi.mock("../src/opencode/index", () => ({
     fetchOpenCodeGoStatus: opencode.status,
     fetchOpenCodeGoStatusWith: opencode.status,
     openCodeStatusOf: () => "unavailable",
+}));
+
+vi.mock("../src/antigravity/index", () => ({
+    fetchAntigravityUsage: antigravity.usage,
+    fetchAntigravityStatus: antigravity.status,
+    antigravityStatusOf: antigravity.statusOf,
+    getAntigravityBackoff: antigravity.backoff,
+    readActiveAntigravityAccountKey: antigravity.accountKey,
+    setAntigravityAccountHint: antigravity.setHint,
 }));
 
 vi.mock("../src/go-vault/windows", () => ({
@@ -202,6 +219,13 @@ describe("sidebar layout", () => {
                         windows: [{ label: "5h", usage: { percentLeft: 100 } }],
                         activeUntil: "2026-10-03T12:00:00Z",
                     },
+                    antigravity: {
+                        plan: "Pro",
+                        windows: [
+                            { label: "Gemini 5h", usage: { percentLeft: 98.7 } },
+                            { label: "Argon Weekly", usage: { percentLeft: 72.2 } },
+                        ],
+                    },
                 }),
                 none,
                 now,
@@ -220,6 +244,12 @@ describe("sidebar layout", () => {
             "Reset unavailable",
             "Until Oct 3 · 2d left",
             rule,
+            "▼ Antigravity · PRO",
+            "Gemini 5h 98.7% left",
+            "Reset unavailable",
+            "Argon Weekly 72.2% left",
+            "Reset unavailable",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -228,6 +258,10 @@ describe("sidebar layout", () => {
         const state = stateWith({
             opencode: { plan: "Go Plus", windows: [{ label: "5h", usage: { percentLeft: 70 } }] },
             codex: { plan: "plus", windows: [{ label: "5h", usage: { percentLeft: 100 } }] },
+            antigravity: {
+                plan: "Pro",
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            },
         });
         expect(displayLines(state, new Set(["all"]), now)).toEqual([
             `▶ ${packageJson.name} (${packageJson.version})`,
@@ -235,6 +269,8 @@ describe("sidebar layout", () => {
             "▶ OpenCode · GO PLUS",
             rule,
             "▶ Codex · PLUS",
+            rule,
+            "▶ Antigravity · PRO",
             rule,
             "/quota-help for help",
         ]);
@@ -269,6 +305,9 @@ describe("sidebar layout", () => {
             "5h 100% left",
             "Reset unavailable",
             rule,
+            "▼ Antigravity",
+            "No data",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -298,6 +337,9 @@ describe("sidebar layout", () => {
             "▼ Codex",
             "No data",
             rule,
+            "▼ Antigravity",
+            "No data",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -316,6 +358,9 @@ describe("sidebar layout", () => {
             "Set OPENCODE_QUOTA_GO_API_KEY",
             rule,
             "▼ Codex",
+            "No data",
+            rule,
+            "▼ Antigravity",
             "No data",
             rule,
             "/quota-help for help",
@@ -652,12 +697,22 @@ describe("default TUI usage refresh and optional Until lookup", () => {
         codex.activeUntil.mockReset();
         opencode.usage.mockReset();
         opencode.status.mockReset();
+        antigravity.usage.mockReset();
+        antigravity.status.mockReset();
+        antigravity.statusOf.mockReset().mockReturnValue("unavailable");
+        antigravity.backoff.mockReset().mockReturnValue({ nextAllowedAt: 0, remainingMs: 0 });
+        antigravity.accountKey.mockReset().mockReturnValue(undefined);
+        antigravity.setHint.mockReset();
         codex.usage.mockResolvedValue({ fiveHour: { percentLeft: 70 }, week: { percentLeft: 75 } });
         codex.activeUntil.mockResolvedValue(undefined);
         opencode.usage.mockResolvedValue([{ label: "5h", usage: { percentLeft: 60 } }]);
         opencode.status.mockResolvedValue(undefined);
+        antigravity.usage.mockResolvedValue({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 90 } }],
+        });
+        antigravity.status.mockResolvedValue(undefined);
         settings.visible = true;
-        settings.enabled = { codex: true, opencode: true };
+        settings.enabled = { codex: true, opencode: true, antigravity: false };
         settings.collapsed = undefined;
         updateSettings.mockClear();
         updateSettings.mockImplementation(async (mutate) => mutate(settings));
@@ -709,10 +764,12 @@ describe("default TUI usage refresh and optional Until lookup", () => {
                 "quota-help.help",
                 "quota-opencode.toggle",
                 "quota-codex.toggle",
+                "quota-antigravity.toggle",
                 "quota-opencode-key.manage",
                 "quota-usage.collapse",
                 "quota-usage.toggle.opencode",
                 "quota-usage.toggle.codex",
+                "quota-usage.toggle.antigravity",
             ]);
             const help = commands().find((entry: { id: string }) => entry.id === "quota-help.help");
             expect(help).toMatchObject({
@@ -722,7 +779,7 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             await help.run();
             expect(toast).toHaveBeenCalledWith({
                 message:
-                    "To show quota, enable a provider with:\n- /quota-opencode\n- /quota-codex",
+                    "To show quota, enable a provider with:\n- /quota-opencode\n- /quota-codex\n- /quota-antigravity",
             });
         } finally {
             if (typeof dispose === "function") {
@@ -1161,7 +1218,7 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             expect(store).toHaveBeenCalledWith("settings", {
                 initial: {
                     visible: true,
-                    enabled: { codex: false, opencode: false },
+                    enabled: { codex: false, opencode: false, antigravity: false },
                     collapsed: [],
                 },
             });
@@ -1889,6 +1946,163 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             resolve(codexWindowsPayload);
             for (let index = 0; index < 5; index++) await Promise.resolve();
             expect(codex.activeUntil).toHaveBeenCalledTimes(1);
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("skips duplicate Antigravity status follow-up when load already resolved plan", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        antigravity.usage.mockResolvedValueOnce({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 90 } }],
+            plan: "Pro",
+        });
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(1);
+            expect(antigravity.status).not.toHaveBeenCalled();
+            expect(currentState().providers.antigravity.plan).toBe("Pro");
+
+            antigravity.usage.mockResolvedValueOnce({
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 85 } }],
+            });
+            antigravity.status.mockResolvedValueOnce({ plan: "Ultra" });
+            await vi.advanceTimersByTimeAsync(120_000);
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+            expect(antigravity.status).toHaveBeenCalledTimes(1);
+            expect(currentState().providers.antigravity.plan).toBe("Ultra");
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("clears previous Antigravity snapshot and triggers immediate refresh when active accountKey changes on the 30s clock", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        antigravity.accountKey.mockReturnValue("acct-key-00000001");
+        antigravity.usage.mockResolvedValueOnce({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            plan: "Pro",
+        });
+
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(1);
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Pro",
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            });
+
+            // Simulate user switching accounts in OpenCode (/antigravity or /ag); hold the next fetch pending
+            // first so we can verify the old account's snapshot was cleared before the new response resolves.
+            let resolveNewAccount!: (value: {
+                windows: { label: string; usage: { percentLeft: number } }[];
+                plan?: string;
+            }) => void;
+            antigravity.usage.mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        resolveNewAccount = resolve;
+                    }),
+            );
+            antigravity.accountKey.mockReturnValue("acct-key-00000002");
+
+            await vi.advanceTimersByTimeAsync(30_000);
+            await settle();
+            expect(currentState().providers.antigravity).toBeUndefined();
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+
+            resolveNewAccount({
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 40 } }],
+                plan: "Free",
+            });
+            await settle();
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Free",
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 40 } }],
+            });
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("immediately switches Antigravity account when OpenCode /connect emits credential.switched for google", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        const listeners = new Map<string, (event: unknown) => void>();
+        let activeEmail = "first@example.com";
+        const customContext = {
+            ...context(),
+            client: {
+                credential: {
+                    list: vi.fn(async () => [
+                        {
+                            id: activeEmail === "first@example.com" ? "cred-1" : "cred-2",
+                            integrationID: "google",
+                            label: activeEmail,
+                            active: true,
+                            value: {
+                                type: "oauth",
+                                methodID: "antigravity",
+                                refresh:
+                                    activeEmail === "first@example.com"
+                                        ? "1//refresh_first"
+                                        : "1//refresh_second",
+                                access: "",
+                                expires: 0,
+                                metadata: { email: activeEmail },
+                            },
+                        },
+                    ]),
+                },
+            },
+            data: {
+                on: vi.fn((type: string, handler: (event: unknown) => void) => {
+                    listeners.set(type, handler);
+                    return () => listeners.delete(type);
+                }),
+            },
+        } as unknown as Parameters<typeof tui.setup>[0];
+
+        antigravity.usage
+            .mockResolvedValueOnce({
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+                plan: "Pro",
+            })
+            .mockResolvedValueOnce({
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 50 } }],
+                plan: "Free",
+            });
+
+        const dispose = await tui.setup(customContext);
+        try {
+            await settle();
+            expect(antigravity.setHint).toHaveBeenLastCalledWith({
+                refreshToken: "1//refresh_first",
+                email: "first@example.com",
+            });
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Pro",
+            });
+
+            // Switch email in /connect > Google
+            activeEmail = "second@example.com";
+            listeners.get("credential.switched")?.({
+                type: "credential.switched",
+                data: { integrationID: "google", credentialID: "cred-2" },
+            });
+            await settle();
+
+            expect(antigravity.setHint).toHaveBeenLastCalledWith({
+                refreshToken: "1//refresh_second",
+                email: "second@example.com",
+            });
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Free",
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 50 } }],
+            });
         } finally {
             if (typeof dispose === "function") dispose();
         }
