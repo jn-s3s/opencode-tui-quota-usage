@@ -20,8 +20,8 @@ const PERCENT_LEFT_WARNING = 45;
 /** Package name and version shown in the main header row. */
 export const PROJECT_NAME = packageJson.name;
 export const PROJECT_VERSION = packageJson.version;
-type ProviderId = "codex" | "opencode";
-type ProviderEnablement = Record<ProviderId, boolean>;
+type ProviderId = "codex" | "opencode" | "antigravity";
+type ProviderEnablement = Partial<Record<ProviderId, boolean>>;
 const noop = () => {};
 function vaultErrorCode(error: unknown): "unavailable" | "corrupt" | "invalid" | undefined {
     if (!error || typeof error !== "object" || !("code" in error)) return undefined;
@@ -521,7 +521,7 @@ export default Plugin.define({
         const [settings, updateSettings] = context.storage.store("settings", {
             initial: {
                 visible: true,
-                enabled: { codex: false, opencode: false },
+                enabled: { codex: false, opencode: false, antigravity: false },
                 collapsed: [] as string[],
             },
         });
@@ -729,7 +729,11 @@ export default Plugin.define({
                 if (enableProvider && !isEnabled("opencode")) {
                     try {
                         await updateSettings((draft) => {
-                            draft.enabled ??= { codex: false, opencode: false };
+                            draft.enabled ??= {
+                                codex: false,
+                                opencode: false,
+                                antigravity: false,
+                            };
                             draft.enabled.opencode = true;
                         });
                     } catch {
@@ -947,7 +951,7 @@ export default Plugin.define({
             }
             try {
                 await updateSettings((draft) => {
-                    draft.enabled ??= { codex: false, opencode: false };
+                    draft.enabled ??= { codex: false, opencode: false, antigravity: false };
                     draft.enabled[id] = next;
                 });
             } catch {
@@ -1122,6 +1126,7 @@ export default Plugin.define({
                             each={layoutRows(state(), collapsed(), now(), {
                                 codex: isEnabled("codex"),
                                 opencode: isEnabled("opencode"),
+                                antigravity: isEnabled("antigravity"),
                             })}
                         >
                             {(row) => {

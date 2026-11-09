@@ -27,6 +27,12 @@ const opencode = vi.hoisted(() => ({
     usage: vi.fn(),
     status: vi.fn(),
 }));
+const antigravity = vi.hoisted(() => ({
+    usage: vi.fn(),
+    status: vi.fn(),
+    statusOf: vi.fn(() => "unavailable"),
+    backoff: vi.fn(() => ({ nextAllowedAt: 0, remainingMs: 0 })),
+}));
 const vault = vi.hoisted(() => ({
     load: vi.fn(async () => undefined),
     save: vi.fn(async (_value: unknown) => {}),
@@ -57,6 +63,13 @@ vi.mock("../src/opencode/index", () => ({
     fetchOpenCodeGoStatus: opencode.status,
     fetchOpenCodeGoStatusWith: opencode.status,
     openCodeStatusOf: () => "unavailable",
+}));
+
+vi.mock("../src/antigravity/index", () => ({
+    fetchAntigravityUsage: antigravity.usage,
+    fetchAntigravityStatus: antigravity.status,
+    antigravityStatusOf: antigravity.statusOf,
+    getAntigravityBackoff: antigravity.backoff,
 }));
 
 vi.mock("../src/go-vault/windows", () => ({
@@ -202,6 +215,13 @@ describe("sidebar layout", () => {
                         windows: [{ label: "5h", usage: { percentLeft: 100 } }],
                         activeUntil: "2026-10-03T12:00:00Z",
                     },
+                    antigravity: {
+                        plan: "Pro",
+                        windows: [
+                            { label: "Gemini 5h", usage: { percentLeft: 98.7 } },
+                            { label: "Argon Weekly", usage: { percentLeft: 72.2 } },
+                        ],
+                    },
                 }),
                 none,
                 now,
@@ -220,6 +240,12 @@ describe("sidebar layout", () => {
             "Reset unavailable",
             "Until Oct 3 · 2d left",
             rule,
+            "▼ Antigravity · PRO",
+            "Gemini 5h 98.7% left",
+            "Reset unavailable",
+            "Argon Weekly 72.2% left",
+            "Reset unavailable",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -228,6 +254,10 @@ describe("sidebar layout", () => {
         const state = stateWith({
             opencode: { plan: "Go Plus", windows: [{ label: "5h", usage: { percentLeft: 70 } }] },
             codex: { plan: "plus", windows: [{ label: "5h", usage: { percentLeft: 100 } }] },
+            antigravity: {
+                plan: "Pro",
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            },
         });
         expect(displayLines(state, new Set(["all"]), now)).toEqual([
             `▶ ${packageJson.name} (${packageJson.version})`,
@@ -235,6 +265,8 @@ describe("sidebar layout", () => {
             "▶ OpenCode · GO PLUS",
             rule,
             "▶ Codex · PLUS",
+            rule,
+            "▶ Antigravity · PRO",
             rule,
             "/quota-help for help",
         ]);
@@ -269,6 +301,9 @@ describe("sidebar layout", () => {
             "5h 100% left",
             "Reset unavailable",
             rule,
+            "▼ Antigravity",
+            "No data",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -298,6 +333,9 @@ describe("sidebar layout", () => {
             "▼ Codex",
             "No data",
             rule,
+            "▼ Antigravity",
+            "No data",
+            rule,
             "/quota-help for help",
         ]);
     });
@@ -316,6 +354,9 @@ describe("sidebar layout", () => {
             "Set OPENCODE_QUOTA_GO_API_KEY",
             rule,
             "▼ Codex",
+            "No data",
+            rule,
+            "▼ Antigravity",
             "No data",
             rule,
             "/quota-help for help",
@@ -652,12 +693,20 @@ describe("default TUI usage refresh and optional Until lookup", () => {
         codex.activeUntil.mockReset();
         opencode.usage.mockReset();
         opencode.status.mockReset();
+        antigravity.usage.mockReset();
+        antigravity.status.mockReset();
+        antigravity.statusOf.mockReset().mockReturnValue("unavailable");
+        antigravity.backoff.mockReset().mockReturnValue({ nextAllowedAt: 0, remainingMs: 0 });
         codex.usage.mockResolvedValue({ fiveHour: { percentLeft: 70 }, week: { percentLeft: 75 } });
         codex.activeUntil.mockResolvedValue(undefined);
         opencode.usage.mockResolvedValue([{ label: "5h", usage: { percentLeft: 60 } }]);
         opencode.status.mockResolvedValue(undefined);
+        antigravity.usage.mockResolvedValue({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 90 } }],
+        });
+        antigravity.status.mockResolvedValue(undefined);
         settings.visible = true;
-        settings.enabled = { codex: true, opencode: true };
+        settings.enabled = { codex: true, opencode: true, antigravity: false };
         settings.collapsed = undefined;
         updateSettings.mockClear();
         updateSettings.mockImplementation(async (mutate) => mutate(settings));
@@ -709,10 +758,12 @@ describe("default TUI usage refresh and optional Until lookup", () => {
                 "quota-help.help",
                 "quota-opencode.toggle",
                 "quota-codex.toggle",
+                "quota-antigravity.toggle",
                 "quota-opencode-key.manage",
                 "quota-usage.collapse",
                 "quota-usage.toggle.opencode",
                 "quota-usage.toggle.codex",
+                "quota-usage.toggle.antigravity",
             ]);
             const help = commands().find((entry: { id: string }) => entry.id === "quota-help.help");
             expect(help).toMatchObject({
@@ -722,7 +773,7 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             await help.run();
             expect(toast).toHaveBeenCalledWith({
                 message:
-                    "To show quota, enable a provider with:\n- /quota-opencode\n- /quota-codex",
+                    "To show quota, enable a provider with:\n- /quota-opencode\n- /quota-codex\n- /quota-antigravity",
             });
         } finally {
             if (typeof dispose === "function") {
@@ -1161,7 +1212,7 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             expect(store).toHaveBeenCalledWith("settings", {
                 initial: {
                     visible: true,
-                    enabled: { codex: false, opencode: false },
+                    enabled: { codex: false, opencode: false, antigravity: false },
                     collapsed: [],
                 },
             });
