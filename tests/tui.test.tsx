@@ -1755,12 +1755,12 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             now,
             { codex: false, opencode: false },
         );
-        expect(rows.some((row) => row.text.includes("Choose a provider"))).toBe(true);
+        expect(rows.some((row) => row.text === "No providers enabled")).toBe(true);
         expect(rows.some((row) => row.text.includes("Disabled ·"))).toBe(false);
         expect(rows.filter((row) => row.toggle && row.toggle !== "all")).toHaveLength(0);
         expect(rows.filter((row) => row.separator)).toHaveLength(1);
         expect(rows.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
-        expect(rows.at(-2)?.text).toContain("Choose a provider");
+        expect(rows.at(-2)?.text).toBe("No providers enabled");
         expect(rows.at(-1)?.muted).toBe(true);
         expect(rows.at(-1)?.rightAlign).toBe(true);
         expect(rows.slice(0, -1).some((row) => row.rightAlign)).toBe(false);
@@ -1772,7 +1772,9 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             { codex: true, opencode: false },
         );
         expect(oneEnabled.some((row) => row.text.includes("70% left"))).toBe(true);
-        expect(oneEnabled.some((row) => row.text === "Also disabled: /quota-opencode")).toBe(true);
+        expect(oneEnabled.some((row) => row.text === "No providers enabled")).toBe(false);
+        expect(oneEnabled.some((row) => row.text.includes("Also disabled"))).toBe(false);
+        expect(oneEnabled.some((row) => row.text.includes("/quota-opencode"))).toBe(false);
         expect(oneEnabled.filter((row) => row.separator)).toHaveLength(2);
         expect(oneEnabled.filter((row) => row.text === "/quota-help for help")).toHaveLength(1);
 
@@ -1790,7 +1792,8 @@ describe("default TUI usage refresh and optional Until lookup", () => {
         expect(opencodeOnly.some((row) => row.toggle === "codex")).toBe(false);
         expect(opencodeOnly.some((row) => row.toggle === "opencode")).toBe(true);
         expect(opencodeOnly.filter((row) => row.separator)).toHaveLength(2);
-        expect(opencodeOnly.some((row) => row.text === "Also disabled: /quota-codex")).toBe(true);
+        expect(opencodeOnly.some((row) => row.text.includes("Also disabled"))).toBe(false);
+        expect(opencodeOnly.some((row) => row.text.includes("/quota-codex"))).toBe(false);
 
         const noneOff = layoutRows(
             { providers: { codex: { windows: codexWindows, fetchedAt: now, status: "" } } },
@@ -1798,7 +1801,7 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             now,
             { codex: true, opencode: true },
         );
-        expect(noneOff.some((row) => row.text.includes("Choose a provider"))).toBe(false);
+        expect(noneOff.some((row) => row.text === "No providers enabled")).toBe(false);
         expect(noneOff.some((row) => row.text.includes("Also disabled"))).toBe(false);
 
         const restored = layoutRows(

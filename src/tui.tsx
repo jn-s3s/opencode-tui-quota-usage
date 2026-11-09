@@ -422,15 +422,9 @@ export function layoutRows(
         },
         SEPARATOR,
     ];
-    const disabled = enabled
-        ? PROVIDERS.filter((provider) => enabled[provider.id as ProviderId] !== true)
-        : [];
-    if (disabled.length > 0) {
+    if (enabled && PROVIDERS.every((provider) => enabled[provider.id as ProviderId] !== true)) {
         rows.push({
-            text:
-                disabled.length === PROVIDERS.length
-                    ? `Choose a provider: ${PROVIDERS.map((provider) => `/quota-${provider.id}`).join(" or ")}`
-                    : `Also disabled: ${disabled.map((provider) => `/quota-${provider.id}`).join(", ")}`,
+            text: "No providers enabled",
             muted: true,
         });
     }
