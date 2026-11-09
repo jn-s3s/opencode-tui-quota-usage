@@ -9,17 +9,23 @@ import {
     AntigravityRateLimitedError,
     antigravityStatusOf,
     buildAntigravityHeaders,
+    exchangeAntigravityRefreshToken,
     fetchAntigravityStatusWith,
+    fetchAntigravityUsage,
     fetchAntigravityUsageWith,
     fromRemainingFraction,
     getAntigravityBackoff,
+    opencodeAntigravityAccountsPath,
     parseAntigravityCredentials,
     parseAntigravityStatus,
     parseAntigravityUsage,
+    parseOpenCodeAntigravityAccounts,
+    readActiveAntigravityAccountKey,
     readAntigravityAuth,
     readAntigravityAuthFile,
     readAntigravityProjectId,
     resetAntigravityBackoff,
+    resetAntigravityTokenCache,
     type FetchImpl,
     type KeyringReader,
 } from "../src/antigravity";
@@ -480,6 +486,454 @@ describe("Antigravity CLI credential parsing and reading (synthetic only)", () =
             readAntigravityAuth(dir, undefined, async () => corruptKeyring),
         );
         expect(antigravityStatusOf(corruptErr)).toBe("missing-login");
+    });
+});
+
+describe("OpenCode antigravity-accounts.json parsing, token exchange, caching and fallback", () => {
+    const jsonHeaders = { "content-type": "application/json" };
+    let baseDir: string;
+
+    beforeAll(() => {
+        baseDir = mkdtempSync(join(tmpdir(), "opencode-agy-accounts-"));
+    });
+    afterAll(() => {
+        rmSync(baseDir, { recursive: true, force: true });
+    });
+
+    test("resolves opencodeAntigravityAccountsPath with env overrides and Windows legacy fallback", () => {
+        const home = join(baseDir, "path-home");
+        mkdirSync(home, { recursive: true });
+        const customOpenCode = join(baseDir, "custom-opencode");
+        const customXdg = join(baseDir, "custom-xdg");
+        const customAppData = join(baseDir, "custom-appdata");
+
+        expect(opencodeAntigravityAccountsPath(home, customOpenCode, customXdg)).toBe(
+            join(customOpenCode, "antigravity-accounts.json"),
+        );
+        expect(opencodeAntigravityAccountsPath(home, undefined, customXdg)).toBe(
+            join(customXdg, "opencode", "antigravity-accounts.json"),
+        );
+        expect(opencodeAntigravityAccountsPath(home, undefined, undefined)).toBe(
+            join(home, ".config", "opencode", "antigravity-accounts.json"),
+        );
+
+        expect(() => opencodeAntigravityAccountsPath(home, "relative/dir")).toThrow(
+            "must be absolute",
+        );
+        expect(() => opencodeAntigravityAccountsPath(home, undefined, "bad\u0000xdg")).toThrow(
+            "invalid",
+        );
+
+        // Windows legacy %APPDATA%/opencode/antigravity-accounts.json when ~/.config/opencode is absent
+        const legacyDir = join(customAppData, "opencode");
+        mkdirSync(legacyDir, { recursive: true });
+        const legacyFile = join(legacyDir, "antigravity-accounts.json");
+        writeFileSync(
+            legacyFile,
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: "1//legacy_refresh" }],
+            }),
+            "utf8",
+        );
+
+        const originalPlatform = process.platform;
+        Object.defineProperty(process, "platform", { value: "win32" });
+        try {
+            expect(opencodeAntigravityAccountsPath(home, undefined, undefined, customAppData)).toBe(
+                legacyFile,
+            );
+
+            // Once ~/.config/opencode/antigravity-accounts.json exists, it takes precedence over legacy AppData
+            const primaryDir = join(home, ".config", "opencode");
+            mkdirSync(primaryDir, { recursive: true });
+            const primaryFile = join(primaryDir, "antigravity-accounts.json");
+            writeFileSync(
+                primaryFile,
+                JSON.stringify({
+                    version: 4,
+                    activeIndex: 0,
+                    accounts: [{ refreshToken: "1//primary_refresh" }],
+                }),
+                "utf8",
+            );
+            expect(opencodeAntigravityAccountsPath(home, undefined, undefined, customAppData)).toBe(
+                primaryFile,
+            );
+        } finally {
+            Object.defineProperty(process, "platform", { value: originalPlatform });
+        }
+    });
+
+    test("parses v1-v4 schemas, activeIndex, activeIndexByFamily, disabled accounts and packed refreshToken", () => {
+        for (const version of [1, 2, 3, 4] as const) {
+            const parsed = parseOpenCodeAntigravityAccounts(
+                JSON.stringify({
+                    version,
+                    activeIndex: 0,
+                    accounts: [{ refreshToken: `1//refresh_v${version}`, projectId: "proj-v" }],
+                }),
+            );
+            expect(parsed.refreshToken).toBe(`1//refresh_v${version}`);
+            expect(parsed.projectId).toBe("proj-v");
+            expect(parsed.accountKey).toMatch(/^[0-9a-f]{16}$/);
+        }
+
+        // Disabled activeIndex falls back to activeIndexByFamily.gemini, then .claude, then first enabled
+        const familyFallback = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                activeIndexByFamily: { gemini: 2, claude: 1 },
+                accounts: [
+                    { refreshToken: "1//disabled_0", enabled: false },
+                    { refreshToken: "1//claude_1", enabled: true },
+                    { refreshToken: "1//gemini_2", enabled: true, projectId: "proj-gem" },
+                ],
+            }),
+        );
+        expect(familyFallback.refreshToken).toBe("1//gemini_2");
+        expect(familyFallback.projectId).toBe("proj-gem");
+
+        const claudeFallback = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 3,
+                activeIndex: 99,
+                activeIndexByFamily: { gemini: 0, claude: 1 },
+                accounts: [
+                    { refreshToken: "1//disabled_0", enabled: false },
+                    { refreshToken: "1//claude_1", enabled: true },
+                ],
+            }),
+        );
+        expect(claudeFallback.refreshToken).toBe("1//claude_1");
+
+        const firstEnabledFallback = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [
+                    { refreshToken: "1//disabled_0", enabled: false },
+                    { refreshToken: "1//enabled_1" },
+                ],
+            }),
+        );
+        expect(firstEnabledFallback.refreshToken).toBe("1//enabled_1");
+
+        // Packed refreshToken|projectId|managedProjectId with managedProjectId precedence
+        const packedWithEmbedded = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: "1//packed_tok|emb-proj|emb-managed" }],
+            }),
+        );
+        expect(packedWithEmbedded.refreshToken).toBe("1//packed_tok");
+        expect(packedWithEmbedded.projectId).toBe("emb-managed");
+
+        const packedEmbeddedProjectOnly = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: "1//packed_tok|emb-proj" }],
+            }),
+        );
+        expect(packedEmbeddedProjectOnly.projectId).toBe("emb-proj");
+
+        const explicitFieldPrecedence = parseOpenCodeAntigravityAccounts(
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [
+                    {
+                        refreshToken: "1//packed_tok|emb-proj|emb-managed",
+                        projectId: "field-proj",
+                        managedProjectId: "field-managed",
+                    },
+                ],
+            }),
+        );
+        expect(explicitFieldPrecedence.projectId).toBe("field-managed");
+
+        // Matches active /connect Google credential hint (by email, accountId, or refreshToken) even when activeIndex lags
+        const multiPool = JSON.stringify({
+            version: 4,
+            activeIndex: 0,
+            accounts: [
+                {
+                    id: "id-alpha",
+                    email: "alpha@example.com",
+                    refreshToken: "1//refresh_alpha",
+                    projectId: "proj-alpha",
+                },
+                {
+                    id: "id-beta",
+                    email: "beta@example.com",
+                    refreshToken: "1//refresh_beta",
+                    projectId: "proj-beta",
+                },
+            ],
+        });
+        expect(
+            parseOpenCodeAntigravityAccounts(multiPool, { email: "BETA@example.com" }),
+        ).toMatchObject({
+            refreshToken: "1//refresh_beta",
+            projectId: "proj-beta",
+        });
+        expect(parseOpenCodeAntigravityAccounts(multiPool, { accountId: "id-beta" })).toMatchObject(
+            {
+                refreshToken: "1//refresh_beta",
+                projectId: "proj-beta",
+            },
+        );
+        expect(
+            parseOpenCodeAntigravityAccounts(multiPool, { refreshToken: "1//refresh_beta" }),
+        ).toMatchObject({
+            refreshToken: "1//refresh_beta",
+            projectId: "proj-beta",
+        });
+
+        // Rejects unsupported version, empty accounts, all disabled, or unsafe refreshToken without leaking secrets
+        const secret = "1//SUPER_SECRET_REFRESH_TOKEN";
+        for (const bad of [
+            "",
+            "{bad",
+            JSON.stringify({ version: 5, activeIndex: 0, accounts: [{ refreshToken: secret }] }),
+            JSON.stringify({ version: 4, activeIndex: 0, accounts: [] }),
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: secret, enabled: false }],
+            }),
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: `${secret} with spaces` }],
+            }),
+        ]) {
+            const err = caughtError(() => parseOpenCodeAntigravityAccounts(bad));
+            expect(antigravityStatusOf(err)).toBe("missing-login");
+            expect(err.message).not.toContain(secret);
+        }
+    });
+
+    test("caches exchanged access_token per accountKey and immediately switches when activeIndex changes", async () => {
+        const home = join(baseDir, "switch-home");
+        const configDir = join(home, ".config", "opencode");
+        mkdirSync(configDir, { recursive: true });
+        const accountsFile = join(configDir, "antigravity-accounts.json");
+
+        const writeAccounts = (activeIndex: number) => {
+            writeFileSync(
+                accountsFile,
+                JSON.stringify({
+                    version: 4,
+                    activeIndex,
+                    accounts: [
+                        { refreshToken: "1//refresh_acct_0", projectId: "proj-acct-0" },
+                        { refreshToken: "1//refresh_acct_1", managedProjectId: "proj-acct-1" },
+                    ],
+                }),
+                "utf8",
+            );
+        };
+
+        writeAccounts(0);
+        const key0 = readActiveAntigravityAccountKey(home, undefined, undefined);
+        expect(key0).toMatch(/^[0-9a-f]{16}$/);
+
+        const tokenCalls: string[] = [];
+        const quotaCalls: Array<{ auth: string; body: string }> = [];
+        const fakeFetch: FetchImpl = async (url, init) => {
+            if (url === "https://oauth2.googleapis.com/token") {
+                tokenCalls.push(init.body);
+                const params = new URLSearchParams(init.body);
+                const rt = params.get("refresh_token");
+                return respond(
+                    200,
+                    {
+                        access_token:
+                            rt === "1//refresh_acct_0" ? "ya29.acct0_tok" : "ya29.acct1_tok",
+                        expires_in: 3600,
+                    },
+                    jsonHeaders,
+                );
+            }
+            quotaCalls.push({ auth: init.headers.Authorization, body: init.body });
+            return respond(200, PRO_PAYLOAD, jsonHeaders);
+        };
+
+        setSystemTime(REAL_NOW);
+        // Poll 1 (Account 0): exchanges refreshToken once and queries quota with proj-acct-0
+        await fetchAntigravityUsage(SIGNAL, { homeDir: home, fetchImpl: fakeFetch, wait: noWait });
+        expect(tokenCalls).toHaveLength(1);
+        expect(quotaCalls).toHaveLength(1);
+        expect(quotaCalls[0]).toEqual({
+            auth: "Bearer ya29.acct0_tok",
+            body: JSON.stringify({ project: "proj-acct-0" }),
+        });
+
+        // Poll 2 (same Account 0, 2 minutes later): reuses cached accessToken without calling token endpoint
+        setSystemTime(REAL_NOW + 2 * 60_000);
+        await fetchAntigravityUsage(SIGNAL, { homeDir: home, fetchImpl: fakeFetch, wait: noWait });
+        expect(tokenCalls).toHaveLength(1);
+        expect(quotaCalls).toHaveLength(2);
+        expect(quotaCalls[1].auth).toBe("Bearer ya29.acct0_tok");
+
+        // Switch activeIndex from 0 -> 1 in antigravity-accounts.json
+        writeAccounts(1);
+        const key1 = readActiveAntigravityAccountKey(home, undefined, undefined);
+        expect(key1).toMatch(/^[0-9a-f]{16}$/);
+        expect(key1).not.toBe(key0);
+
+        // Poll 3 (Account 1): immediately bypasses Account 0 cache, exchanges Account 1 refreshToken and uses proj-acct-1
+        await fetchAntigravityUsage(SIGNAL, { homeDir: home, fetchImpl: fakeFetch, wait: noWait });
+        expect(tokenCalls).toHaveLength(2);
+        expect(quotaCalls).toHaveLength(3);
+        expect(quotaCalls[2]).toEqual({
+            auth: "Bearer ya29.acct1_tok",
+            body: JSON.stringify({ project: "proj-acct-1" }),
+        });
+    });
+
+    test("refreshes expired cached token or reactive 401 once, and surfaces auth on 400 invalid_grant without secret leakage", async () => {
+        const home = join(baseDir, "refresh-home");
+        const configDir = join(home, ".config", "opencode");
+        mkdirSync(configDir, { recursive: true });
+        const secretRefresh = "1//SECRET_REFRESH_MARKER";
+        writeFileSync(
+            join(configDir, "antigravity-accounts.json"),
+            JSON.stringify({
+                version: 4,
+                activeIndex: 0,
+                accounts: [{ refreshToken: secretRefresh, projectId: "proj-r" }],
+            }),
+            "utf8",
+        );
+
+        let tokenMintCount = 0;
+        let failFirstCachedQuotaWith401 = false;
+        const fakeFetch: FetchImpl = async (url, init) => {
+            if (url === "https://oauth2.googleapis.com/token") {
+                tokenMintCount++;
+                return respond(
+                    200,
+                    { access_token: `ya29.minted_${tokenMintCount}`, expires_in: 3600 },
+                    jsonHeaders,
+                );
+            }
+            if (
+                failFirstCachedQuotaWith401 &&
+                init.headers.Authorization === "Bearer ya29.minted_1"
+            ) {
+                failFirstCachedQuotaWith401 = false;
+                return respond(401, { error: "token revoked early" }, jsonHeaders);
+            }
+            return respond(200, PRO_PAYLOAD, jsonHeaders);
+        };
+
+        setSystemTime(REAL_NOW);
+        await fetchAntigravityUsage(SIGNAL, { homeDir: home, fetchImpl: fakeFetch, wait: noWait });
+        expect(tokenMintCount).toBe(1);
+
+        // Reactive 401 on a cached token triggers exactly one refresh + retry
+        failFirstCachedQuotaWith401 = true;
+        const retried = await fetchAntigravityUsage(SIGNAL, {
+            homeDir: home,
+            fetchImpl: fakeFetch,
+            wait: noWait,
+        });
+        expect(tokenMintCount).toBe(2);
+        expect(retried.windows.length).toBeGreaterThan(0);
+
+        // Advancing time into the 5-minute pre-expiry buffer triggers a fresh token exchange
+        setSystemTime(REAL_NOW + 56 * 60_000);
+        await fetchAntigravityUsage(SIGNAL, { homeDir: home, fetchImpl: fakeFetch, wait: noWait });
+        expect(tokenMintCount).toBe(3);
+
+        // 400 invalid_grant from token endpoint surfaces auth ("Antigravity sign-in expired") with no secret leakage
+        resetAntigravityTokenCache();
+        const invalidGrantErr = await caughtRejection(
+            exchangeAntigravityRefreshToken(
+                secretRefresh,
+                SIGNAL,
+                queuedFetch(
+                    respond(
+                        400,
+                        { error: "invalid_grant", error_description: `bad token ${secretRefresh}` },
+                        jsonHeaders,
+                    ),
+                ),
+            ),
+        );
+        expect(antigravityStatusOf(invalidGrantErr)).toBe("auth");
+        expect(safeAntigravityError(invalidGrantErr)).toBe("Antigravity sign-in expired");
+        expect(invalidGrantErr.message).not.toContain(secretRefresh);
+
+        // 429 or 500 from token endpoint surfaces unavailable
+        for (const status of [429, 500, 503]) {
+            const unavailErr = await caughtRejection(
+                exchangeAntigravityRefreshToken(
+                    secretRefresh,
+                    SIGNAL,
+                    queuedFetch(respond(status, { error: "overload" }, jsonHeaders)),
+                ),
+            );
+            expect(antigravityStatusOf(unavailErr)).toBe("unavailable");
+            expect(unavailErr.message).not.toContain(secretRefresh);
+        }
+    });
+
+    test("falls back to agy CLI when antigravity-accounts.json is absent, but fails closed when corrupt", async () => {
+        const home = join(baseDir, "boundary-home");
+        const cliDir = join(home, ".gemini", "antigravity-cli");
+        mkdirSync(cliDir, { recursive: true });
+        writeFileSync(
+            join(cliDir, "antigravity-oauth-token"),
+            JSON.stringify({
+                token: {
+                    access_token: "ya29.expired_agy",
+                    refresh_token: "1//agy_refresh",
+                    expiry: new Date(REAL_NOW - 60_000).toISOString(),
+                },
+            }),
+            "utf8",
+        );
+
+        const emptyKeyring: KeyringReader = {
+            getPassword: async () => null,
+            findPassword: async () => null,
+        };
+
+        setSystemTime(REAL_NOW);
+        // 1. Missing antigravity-accounts.json falls back to agy CLI and refreshes expired agy token in memory
+        const fallbackCreds = await readAntigravityAuth(
+            home,
+            undefined,
+            async () => emptyKeyring,
+            queuedFetch(
+                respond(200, { access_token: "ya29.refreshed_agy", expires_in: 3600 }, jsonHeaders),
+            ),
+            SIGNAL,
+        );
+        expect(fallbackCreds.accessToken).toBe("ya29.refreshed_agy");
+
+        // 2. Corrupt antigravity-accounts.json fails closed with missing-login and NEVER falls back to agy CLI
+        const configDir = join(home, ".config", "opencode");
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(configDir, "antigravity-accounts.json"),
+            "{corrupt-accounts-json",
+            "utf8",
+        );
+        expect(readActiveAntigravityAccountKey(home, undefined, undefined)).toBeUndefined();
+
+        const corruptErr = await caughtRejection(
+            readAntigravityAuth(home, undefined, async () => emptyKeyring),
+        );
+        expect(antigravityStatusOf(corruptErr)).toBe("missing-login");
+        expect(safeAntigravityError(corruptErr)).toBe("Sign in with Antigravity CLI");
     });
 });
 

@@ -32,6 +32,8 @@ const antigravity = vi.hoisted(() => ({
     status: vi.fn(),
     statusOf: vi.fn(() => "unavailable"),
     backoff: vi.fn(() => ({ nextAllowedAt: 0, remainingMs: 0 })),
+    accountKey: vi.fn<() => string | undefined>(() => undefined),
+    setHint: vi.fn(),
 }));
 const vault = vi.hoisted(() => ({
     load: vi.fn(async () => undefined),
@@ -70,6 +72,8 @@ vi.mock("../src/antigravity/index", () => ({
     fetchAntigravityStatus: antigravity.status,
     antigravityStatusOf: antigravity.statusOf,
     getAntigravityBackoff: antigravity.backoff,
+    readActiveAntigravityAccountKey: antigravity.accountKey,
+    setAntigravityAccountHint: antigravity.setHint,
 }));
 
 vi.mock("../src/go-vault/windows", () => ({
@@ -697,6 +701,8 @@ describe("default TUI usage refresh and optional Until lookup", () => {
         antigravity.status.mockReset();
         antigravity.statusOf.mockReset().mockReturnValue("unavailable");
         antigravity.backoff.mockReset().mockReturnValue({ nextAllowedAt: 0, remainingMs: 0 });
+        antigravity.accountKey.mockReset().mockReturnValue(undefined);
+        antigravity.setHint.mockReset();
         codex.usage.mockResolvedValue({ fiveHour: { percentLeft: 70 }, week: { percentLeft: 75 } });
         codex.activeUntil.mockResolvedValue(undefined);
         opencode.usage.mockResolvedValue([{ label: "5h", usage: { percentLeft: 60 } }]);
@@ -1967,6 +1973,136 @@ describe("default TUI usage refresh and optional Until lookup", () => {
             expect(antigravity.usage).toHaveBeenCalledTimes(2);
             expect(antigravity.status).toHaveBeenCalledTimes(1);
             expect(currentState().providers.antigravity.plan).toBe("Ultra");
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("clears previous Antigravity snapshot and triggers immediate refresh when active accountKey changes on the 30s clock", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        antigravity.accountKey.mockReturnValue("acct-key-00000001");
+        antigravity.usage.mockResolvedValueOnce({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            plan: "Pro",
+        });
+
+        const dispose = await tui.setup(context());
+        try {
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(1);
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Pro",
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            });
+
+            // Simulate user switching accounts in OpenCode (/antigravity or /ag); hold the next fetch pending
+            // first so we can verify the old account's snapshot was cleared before the new response resolves.
+            let resolveNewAccount!: (value: {
+                windows: { label: string; usage: { percentLeft: number } }[];
+                plan?: string;
+            }) => void;
+            antigravity.usage.mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        resolveNewAccount = resolve;
+                    }),
+            );
+            antigravity.accountKey.mockReturnValue("acct-key-00000002");
+
+            await vi.advanceTimersByTimeAsync(30_000);
+            await settle();
+            expect(currentState().providers.antigravity).toBeUndefined();
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+
+            resolveNewAccount({
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 40 } }],
+                plan: "Free",
+            });
+            await settle();
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Free",
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 40 } }],
+            });
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("immediately switches Antigravity account when OpenCode /connect emits credential.switched for google", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        const listeners = new Map<string, (event: unknown) => void>();
+        let activeEmail = "first@example.com";
+        const customContext = {
+            ...context(),
+            client: {
+                credential: {
+                    list: vi.fn(async () => [
+                        {
+                            id: activeEmail === "first@example.com" ? "cred-1" : "cred-2",
+                            integrationID: "google",
+                            label: activeEmail,
+                            active: true,
+                            value: {
+                                type: "oauth",
+                                methodID: "antigravity",
+                                refresh:
+                                    activeEmail === "first@example.com"
+                                        ? "1//refresh_first"
+                                        : "1//refresh_second",
+                                access: "",
+                                expires: 0,
+                                metadata: { email: activeEmail },
+                            },
+                        },
+                    ]),
+                },
+            },
+            data: {
+                on: vi.fn((type: string, handler: (event: unknown) => void) => {
+                    listeners.set(type, handler);
+                    return () => listeners.delete(type);
+                }),
+            },
+        } as unknown as Parameters<typeof tui.setup>[0];
+
+        antigravity.usage
+            .mockResolvedValueOnce({
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+                plan: "Pro",
+            })
+            .mockResolvedValueOnce({
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 50 } }],
+                plan: "Free",
+            });
+
+        const dispose = await tui.setup(customContext);
+        try {
+            await settle();
+            expect(antigravity.setHint).toHaveBeenLastCalledWith({
+                refreshToken: "1//refresh_first",
+                email: "first@example.com",
+            });
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Pro",
+            });
+
+            // Switch email in /connect > Google
+            activeEmail = "second@example.com";
+            listeners.get("credential.switched")?.({
+                type: "credential.switched",
+                data: { integrationID: "google", credentialID: "cred-2" },
+            });
+            await settle();
+
+            expect(antigravity.setHint).toHaveBeenLastCalledWith({
+                refreshToken: "1//refresh_second",
+                email: "second@example.com",
+            });
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Free",
+                windows: [{ label: "Gemini Weekly", usage: { percentLeft: 50 } }],
+            });
         } finally {
             if (typeof dispose === "function") dispose();
         }

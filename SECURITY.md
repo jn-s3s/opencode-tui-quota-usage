@@ -1,6 +1,6 @@
 # Security policy
 
-Thanks for helping keep this project safe. The plugin can read and store OpenCode Go / Go Plus API keys and reuses the Codex CLI and Antigravity CLI sign-ins, so treat any credential exposure seriously.
+Thanks for helping keep this project safe. The plugin can read and store OpenCode Go / Go Plus API keys and reuses the Codex CLI sign-in as well as OpenCode's `antigravity-accounts.json` (with fallback to the Antigravity CLI sign-in, exchanging refresh tokens strictly in memory without writing to disk), so treat any credential exposure seriously.
 
 ## Reporting a vulnerability
 
