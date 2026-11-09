@@ -2103,6 +2103,90 @@ describe("default TUI usage refresh and optional Until lookup", () => {
                 plan: "Free",
                 windows: [{ label: "Gemini Weekly", usage: { percentLeft: 50 } }],
             });
+
+            // Unrelated credential.updated events (active Google identity unchanged) must not restart requests
+            listeners.get("credential.updated")?.({
+                type: "credential.updated",
+                data: {},
+            });
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(2);
+
+            // When the active Google credential changes on credential.updated, syncs hint and restarts requests
+            activeEmail = "first@example.com";
+            antigravity.usage.mockResolvedValueOnce({
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 92 } }],
+                plan: "Pro",
+            });
+            listeners.get("credential.updated")?.({
+                type: "credential.updated",
+                data: {},
+            });
+            await settle();
+            expect(antigravity.usage).toHaveBeenCalledTimes(3);
+        } finally {
+            if (typeof dispose === "function") dispose();
+        }
+    });
+
+    test("clears previous Antigravity snapshot when syncActiveGoogleHint detects an account change during a poll", async () => {
+        settings.enabled = { codex: false, opencode: false, antigravity: true };
+        let activeId = "cred-1";
+        let activeKey = "acct-key-00000001";
+        antigravity.accountKey.mockImplementation(() => activeKey);
+        antigravity.setHint.mockImplementation((hint?: { email?: string }) => {
+            activeKey =
+                hint?.email === "cred-2@example.com" ? "acct-key-00000002" : "acct-key-00000001";
+        });
+        const customContext = {
+            ...context(),
+            client: {
+                credential: {
+                    list: vi.fn(async () => [
+                        {
+                            id: activeId,
+                            integrationID: "google",
+                            label: `${activeId}@example.com`,
+                            active: true,
+                            value: {
+                                type: "oauth",
+                                methodID: "antigravity",
+                                refresh: `1//refresh_${activeId}`,
+                                access: "",
+                                expires: 0,
+                                metadata: { email: `${activeId}@example.com` },
+                            },
+                        },
+                    ]),
+                },
+            },
+        } as unknown as Parameters<typeof tui.setup>[0];
+
+        antigravity.usage.mockResolvedValueOnce({
+            windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            plan: "Pro",
+        });
+
+        const dispose = await tui.setup(customContext);
+        try {
+            await settle();
+            expect(currentState().providers.antigravity).toMatchObject({
+                plan: "Pro",
+                windows: [{ label: "Gemini 5h", usage: { percentLeft: 95 } }],
+            });
+
+            // Account changes in credential.list() before the next 2-minute poll, and the new
+            // account's fetch fails: the previous account's windows must not remain carried over.
+            activeId = "cred-2";
+            antigravity.usage.mockRejectedValueOnce(new Error("boom"));
+
+            await vi.advanceTimersByTimeAsync(120_000);
+            await settle();
+            expect(currentState().providers.antigravity).toMatchObject({
+                status: "Unavailable",
+            });
+            expect(currentState().providers.antigravity.windows).toBeUndefined();
+            expect(currentState().providers.antigravity.plan).toBeUndefined();
         } finally {
             if (typeof dispose === "function") dispose();
         }

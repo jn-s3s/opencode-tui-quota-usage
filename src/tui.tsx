@@ -551,7 +551,40 @@ export default Plugin.define({
         let goDialogRequest = 0;
         let lastGoogleCredentialIdentity: string | undefined;
         let lastAntigravityFileKey: string | undefined;
-        let lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+        let lastAntigravityAccountKey: string | undefined = isEnabled("antigravity")
+            ? readActiveAntigravityAccountKey()
+            : undefined;
+
+        const clearProviderState = (id: ProviderId): void => {
+            setState((previous) => {
+                if (!(id in previous.providers)) return previous;
+                const providers = { ...previous.providers };
+                delete providers[id];
+                return { providers };
+            });
+        };
+
+        const applyGoogleCredentialHint = (
+            identity: string,
+            hint: AntigravityAccountHint,
+        ): boolean => {
+            if (identity === lastGoogleCredentialIdentity) return false;
+            lastGoogleCredentialIdentity = identity;
+            setAntigravityAccountHint(hint);
+            lastAntigravityFileKey = readActiveAntigravityAccountKey(
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                false,
+            );
+            const nextKey = readActiveAntigravityAccountKey();
+            if (nextKey !== lastAntigravityAccountKey) {
+                lastAntigravityAccountKey = nextKey;
+                clearProviderState("antigravity");
+            }
+            return true;
+        };
 
         const readIntegrationGoogleHint = ():
             { identity: string; hint: AntigravityAccountHint } | undefined => {
@@ -575,9 +608,9 @@ export default Plugin.define({
             return undefined;
         };
 
-        const syncActiveGoogleHint = async (): Promise<void> => {
+        const syncActiveGoogleHint = async (): Promise<boolean> => {
             if (!context.client?.credential?.list && !context.data?.location?.integration?.list) {
-                return;
+                return false;
             }
             try {
                 const credentials = await context.client?.credential?.list?.();
@@ -605,51 +638,27 @@ export default Plugin.define({
                                 ? oauth.refresh.trim()
                                 : undefined;
                         const identity = `${active.id}:${accountId ?? ""}:${email ?? ""}`;
-                        if (identity !== lastGoogleCredentialIdentity) {
-                            lastGoogleCredentialIdentity = identity;
-                            setAntigravityAccountHint({
-                                ...(refreshToken ? { refreshToken } : {}),
-                                ...(accountId ? { accountId } : {}),
-                                ...(email ? { email } : {}),
-                            });
-                            lastAntigravityFileKey = readActiveAntigravityAccountKey(
-                                undefined,
-                                undefined,
-                                undefined,
-                                undefined,
-                                false,
-                            );
-                            lastAntigravityAccountKey = readActiveAntigravityAccountKey();
-                        }
-                        return;
+                        return applyGoogleCredentialHint(identity, {
+                            ...(refreshToken ? { refreshToken } : {}),
+                            ...(accountId ? { accountId } : {}),
+                            ...(email ? { email } : {}),
+                        });
                     }
                 }
             } catch {
                 // fall back to integration list
             }
             const fallback = readIntegrationGoogleHint();
-            if (fallback && fallback.identity !== lastGoogleCredentialIdentity) {
-                lastGoogleCredentialIdentity = fallback.identity;
-                setAntigravityAccountHint(fallback.hint);
-                lastAntigravityFileKey = readActiveAntigravityAccountKey(
-                    undefined,
-                    undefined,
-                    undefined,
-                    undefined,
-                    false,
-                );
-                lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+            if (fallback) {
+                return applyGoogleCredentialHint(fallback.identity, fallback.hint);
             }
+            return false;
         };
         invalidateOpenCode = () => {
             generation++;
             controller?.abort();
             controller = undefined;
-            setState((previous) => {
-                const providers = { ...previous.providers };
-                delete providers.opencode;
-                return { providers };
-            });
+            clearProviderState("opencode");
         };
         const getGoCredentials = () => storedCredentials;
 
@@ -1078,11 +1087,7 @@ export default Plugin.define({
                 });
             } else {
                 // Invalidate pending work without stopping another enabled provider's next poll.
-                setState((previous) => {
-                    const providers = { ...previous.providers };
-                    delete providers[id];
-                    return { providers };
-                });
+                clearProviderState(id);
                 restartRequests();
                 context.ui.toast.show({
                     message: `${PROVIDERS.find((p) => p.id === id)?.label} disabled`,
@@ -1135,6 +1140,7 @@ export default Plugin.define({
             clock = setInterval(() => {
                 setNow(Date.now());
                 if (shown() && isEnabled("antigravity")) {
+                    let nextKey: string | undefined;
                     if (lastGoogleCredentialIdentity !== undefined) {
                         const rawFileKey = readActiveAntigravityAccountKey(
                             undefined,
@@ -1146,16 +1152,16 @@ export default Plugin.define({
                         if (rawFileKey !== undefined && rawFileKey !== lastAntigravityFileKey) {
                             lastAntigravityFileKey = rawFileKey;
                             setAntigravityAccountHint(undefined);
+                            nextKey = rawFileKey;
+                        } else {
+                            nextKey = readActiveAntigravityAccountKey();
                         }
+                    } else {
+                        nextKey = readActiveAntigravityAccountKey();
                     }
-                    const nextKey = readActiveAntigravityAccountKey();
                     if (nextKey !== lastAntigravityAccountKey) {
                         lastAntigravityAccountKey = nextKey;
-                        setState((previous) => {
-                            const providers = { ...previous.providers };
-                            delete providers.antigravity;
-                            return { providers };
-                        });
+                        clearProviderState("antigravity");
                         restartRequests();
                     }
                 }
@@ -1167,24 +1173,22 @@ export default Plugin.define({
             lastGoogleCredentialIdentity = undefined;
             const immediate = readIntegrationGoogleHint();
             if (immediate) {
-                setAntigravityAccountHint(immediate.hint);
-                lastAntigravityAccountKey = readActiveAntigravityAccountKey();
+                applyGoogleCredentialHint(immediate.identity, immediate.hint);
+            } else {
+                clearProviderState("antigravity");
             }
             if (shown() && isEnabled("antigravity")) {
-                setState((previous) => {
-                    const providers = { ...previous.providers };
-                    delete providers.antigravity;
-                    return { providers };
-                });
+                clearProviderState("antigravity");
                 restartRequests();
             }
         });
         const stopCredentialUpdated = context.data?.on?.("credential.updated", () => {
-            if (disposed) return;
-            lastGoogleCredentialIdentity = undefined;
-            if (shown() && isEnabled("antigravity")) {
-                restartRequests();
-            }
+            if (disposed || !shown() || !isEnabled("antigravity")) return;
+            void syncActiveGoogleHint().then((changed) => {
+                if (!disposed && changed && shown() && isEnabled("antigravity")) {
+                    restartRequests();
+                }
+            });
         });
 
         applyVisibility(settings.visible);
