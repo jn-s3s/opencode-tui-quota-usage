@@ -15,6 +15,8 @@ updates:
           opentui:
               patterns:
                   - "@opentui/*"
+          solid-js:
+              patterns:
                   - "solid-js"
           dev-tooling:
               dependency-type: "development"
